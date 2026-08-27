@@ -1,0 +1,12 @@
+[build]
+target = "index.html"
+dist = "dist"
+
+# Lets `trunk serve` proxy API/WS calls to the backend during frontend-only dev.
+# Not used when the backend serves the built `dist/` directory directly.
+[[proxy]]
+backend = "http://127.0.0.1:3000/api"
+
+[[proxy]]
+backend = "http://127.0.0.1:3000/ws"
+ws = true
