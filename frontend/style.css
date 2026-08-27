@@ -406,6 +406,211 @@ tbody tr:hover {
   cursor: default;
 }
 
+.clickable-row {
+  cursor: pointer;
+}
+
+.reason-hint {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--status-warning);
+}
+
+/* Pod detail panel */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: clamp(16px, 5vw, 48px) 16px;
+  z-index: 100;
+  overflow-y: auto;
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  width: 100%;
+  max-width: 760px;
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.panel-head h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.icon-button {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  width: 28px;
+  height: 28px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.icon-button:hover {
+  color: var(--text-primary);
+  border-color: var(--text-muted);
+}
+
+.panel section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.panel h3 {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.container-list,
+.event-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.container-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+}
+
+.container-row-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.container-name {
+  font-weight: 500;
+}
+
+.container-row .reason {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--status-warning);
+}
+
+.container-row .message {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.event-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  font-size: 13px;
+}
+
+.event-reason {
+  font-weight: 500;
+}
+
+.event-message {
+  color: var(--text-secondary);
+  flex: 1 1 260px;
+}
+
+.event-count {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.log-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.log-controls select,
+.log-controls .tail-input {
+  background: var(--page);
+  border: 1px solid var(--border-strong);
+  color: var(--text-primary);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  font-size: 13px;
+}
+
+.log-controls .tail-input {
+  width: 90px;
+}
+
+.log-controls .checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.log-controls button {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.log-controls button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.log-view {
+  background: var(--page);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  max-height: 360px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 @media (max-width: 480px) {
   header {
     flex-direction: column;
@@ -419,5 +624,15 @@ tbody tr:hover {
   .tab-button {
     flex: 1;
     text-align: center;
+  }
+
+  .overlay {
+    padding: 0;
+  }
+
+  .panel {
+    max-width: none;
+    min-height: 100vh;
+    border-radius: 0;
   }
 }

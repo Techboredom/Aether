@@ -1,5 +1,6 @@
 mod create_deployment_tab;
 mod format;
+mod pod_detail;
 mod pods_tab;
 mod ws;
 

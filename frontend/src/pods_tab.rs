@@ -5,6 +5,7 @@ use gloo_net::http::Request;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
+use crate::pod_detail::PodDetailPanel;
 use crate::{format, ws};
 
 #[component]
@@ -12,6 +13,7 @@ pub fn PodsTab() -> impl IntoView {
     let pods: RwSignal<HashMap<String, PodInfo>> = RwSignal::new(HashMap::new());
     let connected = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
+    let selected_pod: RwSignal<Option<String>> = RwSignal::new(None);
 
     spawn_local(async move {
         match Request::get("/api/pods").send().await {
@@ -100,7 +102,7 @@ pub fn PodsTab() -> impl IntoView {
                     </thead>
                     <tbody>
                         <For each=move || rows.get() key=|pod| pod.name.clone() let(pod)>
-                            <PodRow pod=pod />
+                            <PodRow pod=pod selected_pod=selected_pod />
                         </For>
                     </tbody>
                 </table>
@@ -109,23 +111,32 @@ pub fn PodsTab() -> impl IntoView {
                     <p class="empty">"No pods found in this namespace."</p>
                 </Show>
             </div>
+
+            {move || {
+                selected_pod
+                    .get()
+                    .map(|name| view! { <PodDetailPanel pods=pods name=name selected=selected_pod /> })
+            }}
         </div>
     }
 }
 
 #[component]
-fn PodRow(pod: PodInfo) -> impl IntoView {
+fn PodRow(pod: PodInfo, selected_pod: RwSignal<Option<String>>) -> impl IntoView {
     let ready = format!("{}/{}", pod.ready_containers, pod.total_containers);
     let accelerators = format::accelerators(&pod.accelerators);
     let badge_class = format!("badge {}", format::phase_class(&pod.phase));
+    let reason = format::pod_reason(&pod.containers);
+    let row_name = pod.name.clone();
 
     view! {
-        <tr>
+        <tr class="clickable-row" on:click=move |_| selected_pod.set(Some(row_name.clone()))>
             <td>{pod.name.clone()}</td>
             <td>
                 <span class=badge_class>{pod.phase.clone()}</span>
                 " "
                 <span class="ready">{ready}</span>
+                {reason.map(|r| view! { <div class="reason-hint">{r}</div> })}
             </td>
             <td>{pod.node.clone().unwrap_or_else(|| "—".into())}</td>
             <td>{pod.restarts}</td>
