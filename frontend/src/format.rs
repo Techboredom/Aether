@@ -24,6 +24,16 @@ pub fn bytes(b: Option<i64>) -> String {
     format!("{b}B")
 }
 
+/// Maps a pod phase to one of the dashboard's fixed status-badge classes.
+pub fn phase_class(phase: &str) -> &'static str {
+    match phase {
+        "Running" | "Succeeded" => "good",
+        "Pending" => "warning",
+        "Failed" => "critical",
+        _ => "serious",
+    }
+}
+
 pub fn accelerators(accelerators: &BTreeMap<String, i64>) -> String {
     if accelerators.is_empty() {
         return "—".to_string();
