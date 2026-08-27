@@ -222,3 +222,35 @@ To watch a namespace other than `ollama`, either:
 - `CorsLayer::permissive()` is enabled on the backend to make local `trunk
   serve` dev proxying easy. It's harmless behind the cluster's internal
   network, but tighten it if this is ever exposed beyond localhost/your LAN.
+
+## Status & known limitations
+
+Everything above is implemented and has been exercised against the real
+cluster (not just locally built), including the failure-diagnosis path
+against a pod that had genuinely been `Failed` for two weeks. Known gaps,
+in case they matter for what you do next:
+
+- **Not yet deployed for real.** `k8s/` has only ever been validated with
+  `--dry-run=server`; nobody has run `kubectl apply -k k8s/` for real. You
+  still need to create the `regcred` and `aether-db` secrets in-cluster and
+  actually apply it (see "Deploying to Kubernetes" above).
+- **No in-cluster Postgres.** `DATABASE_URL` currently has to point at a
+  Postgres you already run somewhere; there's no `k8s/postgres.yaml`. Add
+  one if you want this to be fully self-contained.
+- **No admin UI for the image catalog** — entries are added with raw SQL
+  (see "Image catalog" above). Fine for a handful of images, less so at
+  scale.
+- **Single namespace only**, fixed at deploy time via the pod's own
+  namespace. No in-app namespace switcher; watching multiple namespaces
+  means deploying multiple copies (see "Watching a different namespace").
+- **No way to scale, delete, or edit a Deployment from the UI** — only
+  create. Same for pods: no delete/restart action, view-only plus logs.
+- **Dashboard is dark-mode only**, no light theme or user preference toggle.
+  Colors are pulled from the project's validated dark dashboard palette
+  (status/accent/surface tokens) rather than picked ad hoc — keep new UI
+  work on those tokens (`frontend/style.css` custom properties) rather than
+  introducing new hex values.
+- **Cross-compiling `linux/amd64` locally from an arm64 Mac doesn't work**
+  (QEMU crashes `rustc`) — this is why the image is built by CI, not on a
+  dev machine. If you ever need a local amd64 build, do it on an actual
+  amd64 box, not by fighting emulation.
