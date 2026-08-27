@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: pod-dashboard
+  namespace: ollama
+  labels:
+    app: pod-dashboard
+spec:
+  type: LoadBalancer
+  selector:
+    app: pod-dashboard
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http

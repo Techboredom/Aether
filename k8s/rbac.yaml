@@ -1,0 +1,26 @@
+# Read-only access to pods in this namespace only — the app watches exactly one
+# namespace (set via the NAMESPACE env var in deployment.yaml), so a namespaced
+# Role is enough; it never needs a ClusterRole.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-dashboard-pod-reader
+  namespace: ollama
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pod-dashboard-pod-reader
+  namespace: ollama
+subjects:
+  - kind: ServiceAccount
+    name: pod-dashboard
+    namespace: ollama
+roleRef:
+  kind: Role
+  name: pod-dashboard-pod-reader
+  apiGroup: rbac.authorization.k8s.io
