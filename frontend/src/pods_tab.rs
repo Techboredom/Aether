@@ -35,6 +35,11 @@ pub fn PodsTab() -> impl IntoView {
         list
     });
 
+    let total = Memo::new(move |_| rows.get().len());
+    let running = Memo::new(move |_| rows.get().iter().filter(|p| p.phase == "Running").count());
+    let pending = Memo::new(move |_| rows.get().iter().filter(|p| p.phase == "Pending").count());
+    let failed = Memo::new(move |_| rows.get().iter().filter(|p| p.phase == "Failed").count());
+
     view! {
         <div class="tab-panel">
             <div class="panel-header">
@@ -49,31 +54,61 @@ pub fn PodsTab() -> impl IntoView {
                     .map(|msg| view! { <div class="error">{msg}</div> })
             }}
 
-            <table>
-                <thead>
-                    <tr>
-                        <th>"Name"</th>
-                        <th>"Status"</th>
-                        <th>"Node"</th>
-                        <th>"Restarts"</th>
-                        <th>"Age"</th>
-                        <th>"CPU request"</th>
-                        <th>"CPU limit"</th>
-                        <th>"Memory request"</th>
-                        <th>"Memory limit"</th>
-                        <th>"Accelerators"</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <For each=move || rows.get() key=|pod| pod.name.clone() let(pod)>
-                        <PodRow pod=pod />
-                    </For>
-                </tbody>
-            </table>
+            <div class="stats">
+                <div class="stat-tile">
+                    <span class="stat-value">{total}</span>
+                    <span class="stat-label">"Total pods"</span>
+                </div>
+                <div class="stat-tile">
+                    <span class="stat-value">
+                        <span class="stat-dot good"></span>
+                        {running}
+                    </span>
+                    <span class="stat-label">"Running"</span>
+                </div>
+                <div class="stat-tile">
+                    <span class="stat-value">
+                        <span class="stat-dot warning"></span>
+                        {pending}
+                    </span>
+                    <span class="stat-label">"Pending"</span>
+                </div>
+                <div class="stat-tile">
+                    <span class="stat-value">
+                        <span class="stat-dot critical"></span>
+                        {failed}
+                    </span>
+                    <span class="stat-label">"Failed"</span>
+                </div>
+            </div>
 
-            <Show when=move || rows.get().is_empty()>
-                <p class="empty">"No pods found in this namespace."</p>
-            </Show>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>"Name"</th>
+                            <th>"Status"</th>
+                            <th>"Node"</th>
+                            <th>"Restarts"</th>
+                            <th>"Age"</th>
+                            <th>"CPU request"</th>
+                            <th>"CPU limit"</th>
+                            <th>"Memory request"</th>
+                            <th>"Memory limit"</th>
+                            <th>"Accelerators"</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <For each=move || rows.get() key=|pod| pod.name.clone() let(pod)>
+                            <PodRow pod=pod />
+                        </For>
+                    </tbody>
+                </table>
+
+                <Show when=move || rows.get().is_empty()>
+                    <p class="empty">"No pods found in this namespace."</p>
+                </Show>
+            </div>
         </div>
     }
 }
@@ -82,14 +117,13 @@ pub fn PodsTab() -> impl IntoView {
 fn PodRow(pod: PodInfo) -> impl IntoView {
     let ready = format!("{}/{}", pod.ready_containers, pod.total_containers);
     let accelerators = format::accelerators(&pod.accelerators);
+    let badge_class = format!("badge {}", format::phase_class(&pod.phase));
 
     view! {
         <tr>
             <td>{pod.name.clone()}</td>
             <td>
-                <span class="phase" data-phase=pod.phase.clone()>
-                    {pod.phase.clone()}
-                </span>
+                <span class=badge_class>{pod.phase.clone()}</span>
                 " "
                 <span class="ready">{ready}</span>
             </td>
