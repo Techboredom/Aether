@@ -1,21 +1,21 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: pod-dashboard
+  name: aether
   namespace: ollama
   labels:
-    app: pod-dashboard
+    app: aether
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: pod-dashboard
+      app: aether
   template:
     metadata:
       labels:
-        app: pod-dashboard
+        app: aether
     spec:
-      serviceAccountName: pod-dashboard
+      serviceAccountName: aether
       # The image is amd64-only (built by CI on an amd64 box); the cluster's
       # arm64 nodes are the dedicated MetalLB speaker/controller pool.
       nodeSelector:
@@ -26,8 +26,8 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: pod-dashboard
-          image: ctr.int.example.com:8443/pod-dashboard:latest
+        - name: aether
+          image: ctr.int.example.com:8443/aether:latest
           imagePullPolicy: Always
           ports:
             - name: http

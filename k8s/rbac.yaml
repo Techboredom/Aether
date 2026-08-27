@@ -4,7 +4,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: pod-dashboard-pod-reader
+  name: aether-pod-reader
   namespace: ollama
 rules:
   - apiGroups: [""]
@@ -14,13 +14,13 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: pod-dashboard-pod-reader
+  name: aether-pod-reader
   namespace: ollama
 subjects:
   - kind: ServiceAccount
-    name: pod-dashboard
+    name: aether
     namespace: ollama
 roleRef:
   kind: Role
-  name: pod-dashboard-pod-reader
+  name: aether-pod-reader
   apiGroup: rbac.authorization.k8s.io

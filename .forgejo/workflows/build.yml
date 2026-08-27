@@ -11,7 +11,7 @@ jobs:
     runs-on: docker
     env:
       REGISTRY: ctr.int.example.com:8443
-      IMAGE: ctr.int.example.com:8443/pod-dashboard
+      IMAGE: ctr.int.example.com:8443/aether
     steps:
       - name: Checkout
         uses: actions/checkout@v4
