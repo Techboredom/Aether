@@ -33,3 +33,34 @@ pub enum PodEvent {
     /// A pod was deleted, identified by name (unique within the watched namespace).
     Delete { name: String },
 }
+
+/// A container image available to pick from in the "create deployment" form,
+/// backed by a row in the `images` Postgres table.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ImageEntry {
+    pub id: i32,
+    pub name: String,
+    pub image: String,
+    pub description: String,
+}
+
+/// Submitted by the "create deployment" form.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreateDeploymentRequest {
+    pub name: String,
+    pub image: String,
+    pub replicas: i32,
+    pub cpu_request: Option<String>,
+    pub cpu_limit: Option<String>,
+    pub memory_request: Option<String>,
+    pub memory_limit: Option<String>,
+    /// Accelerator resource name, e.g. "nvidia.com/gpu" or "amd.com/gpu".
+    pub accelerator_type: Option<String>,
+    pub accelerator_count: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreateDeploymentResponse {
+    pub name: String,
+    pub namespace: String,
+}

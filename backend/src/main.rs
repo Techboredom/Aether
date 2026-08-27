@@ -1,3 +1,6 @@
+mod deployments;
+mod error;
+mod images;
 mod resources;
 mod state;
 mod watch;
@@ -5,10 +8,11 @@ mod ws;
 
 use std::net::SocketAddr;
 
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use clap::Parser;
 use kube::Client;
+use sqlx::postgres::PgPoolOptions;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
@@ -31,6 +35,10 @@ struct Args {
     /// Directory containing the built frontend (trunk build output) to serve as static files.
     #[arg(long, env = "STATIC_DIR", default_value = "frontend/dist")]
     static_dir: String,
+
+    /// Postgres connection string backing the container image catalog.
+    #[arg(long, env = "DATABASE_URL")]
+    database_url: String,
 }
 
 #[tokio::main]
@@ -44,7 +52,10 @@ async fn main() -> anyhow::Result<()> {
     // Tries an in-cluster service account first, then falls back to the local kubeconfig.
     let client = Client::try_default().await?;
 
-    let state = AppState::new(args.namespace.clone());
+    let pg = PgPoolOptions::new().max_connections(5).connect(&args.database_url).await?;
+    sqlx::migrate!().run(&pg).await?;
+
+    let state = AppState::new(args.namespace.clone(), client.clone(), pg);
     tokio::spawn(watch::run(state.clone(), client));
 
     let index_html = format!("{}/index.html", args.static_dir);
@@ -52,6 +63,8 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/api/pods", get(ws::list_pods))
+        .route("/api/images", get(images::list_images))
+        .route("/api/deployments", post(deployments::create_deployment))
         .route("/ws", get(ws::ws_handler))
         .fallback_service(static_service)
         .layer(CorsLayer::permissive())
