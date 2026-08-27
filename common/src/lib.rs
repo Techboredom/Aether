@@ -13,13 +13,29 @@ pub struct PodInfo {
     pub restarts: i32,
     /// RFC3339 pod start time; the frontend derives "age" from this at render time.
     pub start_time: Option<String>,
-    pub container_images: Vec<String>,
+    pub containers: Vec<ContainerStatusInfo>,
     pub cpu_request_millicores: Option<i64>,
     pub cpu_limit_millicores: Option<i64>,
     pub memory_request_bytes: Option<i64>,
     pub memory_limit_bytes: Option<i64>,
     /// e.g. "nvidia.com/gpu" -> 1, "amd.com/gpu" -> 2, summed across containers.
     pub accelerators: BTreeMap<String, i64>,
+}
+
+/// Per-container status, surfaced so the UI can explain *why* a pod isn't healthy
+/// (waiting/terminated reason + message) without a separate round trip.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ContainerStatusInfo {
+    pub name: String,
+    pub image: String,
+    pub ready: bool,
+    pub restart_count: i32,
+    /// "running" | "waiting" | "terminated" | "unknown"
+    pub state: String,
+    /// e.g. "CrashLoopBackOff", "ImagePullBackOff", "OOMKilled".
+    pub reason: Option<String>,
+    pub message: Option<String>,
+    pub exit_code: Option<i32>,
 }
 
 /// Messages sent from backend to frontend over the pods WebSocket.
@@ -63,4 +79,17 @@ pub struct CreateDeploymentRequest {
 pub struct CreateDeploymentResponse {
     pub name: String,
     pub namespace: String,
+}
+
+/// A Kubernetes Event involving a specific pod (scheduling failures, image pull
+/// errors, OOM kills, etc. all surface here, often before it's visible any other way).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PodEventInfo {
+    /// "Normal" or "Warning".
+    pub type_: String,
+    pub reason: String,
+    pub message: String,
+    pub count: i32,
+    /// RFC3339 timestamp of the most recent occurrence, if known.
+    pub last_seen: Option<String>,
 }

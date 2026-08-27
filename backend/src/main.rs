@@ -1,6 +1,8 @@
 mod deployments;
 mod error;
+mod events;
 mod images;
+mod logs;
 mod resources;
 mod state;
 mod watch;
@@ -65,6 +67,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/pods", get(ws::list_pods))
         .route("/api/images", get(images::list_images))
         .route("/api/deployments", post(deployments::create_deployment))
+        .route("/api/pods/{name}/logs", get(logs::get_pod_logs))
+        .route("/api/pods/{name}/events", get(events::get_pod_events))
         .route("/ws", get(ws::ws_handler))
         .fallback_service(static_service)
         .layer(CorsLayer::permissive())

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
-use common::PodInfo;
-use k8s_openapi::api::core::v1::Pod;
+use common::{ContainerStatusInfo, PodInfo};
+use k8s_openapi::api::core::v1::{ContainerStatus, Pod};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 
 /// Converts a Kubernetes `Pod` into our slimmed-down `PodInfo`, aggregating
@@ -22,19 +22,13 @@ pub fn pod_to_info(pod: &Pod) -> PodInfo {
         .and_then(|s| s.start_time.as_ref())
         .map(|t| t.0.to_string());
 
-    let container_images = spec
-        .map(|s| s.containers.iter().map(|c| c.image.clone().unwrap_or_default()).collect())
-        .unwrap_or_default();
-
     let total_containers = spec.map(|s| s.containers.len() as u32).unwrap_or(0);
-    let (ready_containers, restarts) = status
+    let containers: Vec<ContainerStatusInfo> = status
         .and_then(|s| s.container_statuses.as_ref())
-        .map(|statuses| {
-            let ready = statuses.iter().filter(|c| c.ready).count() as u32;
-            let restarts = statuses.iter().map(|c| c.restart_count).sum();
-            (ready, restarts)
-        })
-        .unwrap_or((0, 0));
+        .map(|statuses| statuses.iter().map(container_status_info).collect())
+        .unwrap_or_default();
+    let ready_containers = containers.iter().filter(|c| c.ready).count() as u32;
+    let restarts = containers.iter().map(|c| c.restart_count).sum();
 
     let mut cpu_request_millicores: Option<i64> = None;
     let mut cpu_limit_millicores: Option<i64> = None;
@@ -89,12 +83,46 @@ pub fn pod_to_info(pod: &Pod) -> PodInfo {
         total_containers,
         restarts,
         start_time,
-        container_images,
+        containers,
         cpu_request_millicores,
         cpu_limit_millicores,
         memory_request_bytes,
         memory_limit_bytes,
         accelerators,
+    }
+}
+
+/// Extracts the current state (running/waiting/terminated) and, if unhealthy,
+/// the reason/message/exit code that explain why — the data behind "why is
+/// this pod failing".
+fn container_status_info(cs: &ContainerStatus) -> ContainerStatusInfo {
+    let (state, reason, message, exit_code) = match cs.state.as_ref() {
+        Some(s) if s.running.is_some() => ("running".to_string(), None, None, None),
+        Some(s) if s.waiting.is_some() => {
+            let waiting = s.waiting.as_ref().unwrap();
+            ("waiting".to_string(), waiting.reason.clone(), waiting.message.clone(), None)
+        }
+        Some(s) if s.terminated.is_some() => {
+            let terminated = s.terminated.as_ref().unwrap();
+            (
+                "terminated".to_string(),
+                terminated.reason.clone(),
+                terminated.message.clone(),
+                Some(terminated.exit_code),
+            )
+        }
+        _ => ("unknown".to_string(), None, None, None),
+    };
+
+    ContainerStatusInfo {
+        name: cs.name.clone(),
+        image: cs.image.clone(),
+        ready: cs.ready,
+        restart_count: cs.restart_count,
+        state,
+        reason,
+        message,
+        exit_code,
     }
 }
 

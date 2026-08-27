@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use common::ContainerStatusInfo;
+
 pub fn millicores(m: Option<i64>) -> String {
     match m {
         None => "—".to_string(),
@@ -32,6 +34,16 @@ pub fn phase_class(phase: &str) -> &'static str {
         "Failed" => "critical",
         _ => "serious",
     }
+}
+
+/// Picks the most relevant "why" reason to show next to a pod's status badge,
+/// e.g. "CrashLoopBackOff" or "ImagePullBackOff" — the first non-running
+/// container's reason, if any.
+pub fn pod_reason(containers: &[ContainerStatusInfo]) -> Option<String> {
+    containers
+        .iter()
+        .find(|c| c.state != "running" && c.reason.is_some())
+        .and_then(|c| c.reason.clone())
 }
 
 pub fn accelerators(accelerators: &BTreeMap<String, i64>) -> String {

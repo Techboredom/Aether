@@ -4,7 +4,10 @@ A small dashboard for a Kubernetes namespace, with two tabs:
 
 - **Pods** — shows the running pods live, with their basic resource info:
   CPU/memory requests and limits, accelerators (GPUs, etc.), status, node,
-  restarts, and age.
+  restarts, and age. Click a row to open its detail panel: per-container
+  state and failure reason (`CrashLoopBackOff`, `ImagePullBackOff`, exit
+  codes, etc.), recent Kubernetes Events, and a log viewer (container
+  picker, tail length, previous-container logs for ones that crashed).
 - **Create Deployment** — a form to create a new `Deployment` in that
   namespace: pick a container image from a Postgres-backed catalog, set
   replicas, CPU/memory requests+limits, and an optional accelerator
@@ -80,6 +83,8 @@ All flags can also be set as environment variables:
 - `GET /ws` — WebSocket; sends a full snapshot on connect, then `upsert`/`delete` events as pods change
 - `GET /api/images` — JSON list of catalog entries from the `images` table (id, name, image, description)
 - `POST /api/deployments` — creates a `Deployment` in the watched namespace; body is `{name, image, replicas, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count}` (all the resource fields and `accelerator_type`/`accelerator_count` are optional/nullable)
+- `GET /api/pods/{name}/logs?container=&tail_lines=&previous=` — plain-text container logs (`container` defaults to the pod's only container if it has one; `tail_lines` defaults to 500; `previous=true` gets the last terminated instance's logs, for a crashed container)
+- `GET /api/pods/{name}/events` — JSON list of Kubernetes Events involving that pod (`type_`, `reason`, `message`, `count`, `last_seen`), most recent first — note the apiserver's default Event TTL is short (commonly ~1h), so older pods often have none left
 - `GET /*` — serves the built frontend (`index.html`, JS, WASM, CSS)
 
 ## Image catalog (Postgres)
@@ -170,7 +175,8 @@ watched namespace = deployed namespace). They're pinned to `amd64` nodes via
    This creates:
    - `ServiceAccount` + `Role`/`RoleBinding` (`aether`) — scoped to the
      `ollama` namespace only, no cluster-wide permissions: `get`/`list`/`watch`
-     on `pods` (Pods tab), plus `create`/`get` on `apps/deployments` (Create
+     on `pods` plus `get` on `pods/log` and `get`/`list` on `events` (Pods tab
+     and its detail panel), and `create`/`get` on `apps/deployments` (Create
      Deployment tab).
    - `Deployment` (`aether`) — 1 replica, resource requests/limits set, health
      probes on `/api/pods`, hardened `securityContext` (non-root, read-only
@@ -200,10 +206,13 @@ To watch a namespace other than `ollama`, either:
 ## Security notes
 
 - RBAC is intentionally minimal and namespaced (no `ClusterRole`): read-only
-  (`get`/`list`/`watch`) on `pods`, plus `create`/`get` on `apps/deployments` —
+  (`get`/`list`/`watch`) on `pods`, `get` on the `pods/log` subresource,
+  `get`/`list` on `events`, plus `create`/`get` on `apps/deployments` —
   nothing else. The app can create Deployments but can't delete, patch, list,
   or watch existing ones, and has no access to Secrets, ConfigMaps, RBAC
-  objects, etc.
+  objects, etc. Pod logs can contain sensitive application output; anyone who
+  can reach this dashboard can read the logs of anything running in the
+  watched namespace.
 - The Create Deployment form does not sanitize CPU/memory quantity strings
   beyond checking they're non-empty — malformed values are rejected by the
   Kubernetes API server itself (returned to the UI as an error), not

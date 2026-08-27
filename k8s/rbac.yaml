@@ -10,6 +10,13 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
+  # Pod detail panel: container logs, and events explaining why a pod is unhealthy.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
   # Create-deployment tab: only enough to create a Deployment and read it back.
   - apiGroups: ["apps"]
     resources: ["deployments"]
