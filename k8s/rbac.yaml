@@ -1,20 +1,24 @@
-# Read-only access to pods in this namespace only — the app watches exactly one
-# namespace (set via the NAMESPACE env var in deployment.yaml), so a namespaced
-# Role is enough; it never needs a ClusterRole.
+# Everything this app's ServiceAccount can do, scoped to this namespace only —
+# no ClusterRole, since the app only ever watches/manages its own namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: aether-pod-reader
+  name: aether
   namespace: ollama
 rules:
+  # Pods tab: read-only, to watch and display the running pods.
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
+  # Create-deployment tab: only enough to create a Deployment and read it back.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create", "get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: aether-pod-reader
+  name: aether
   namespace: ollama
 subjects:
   - kind: ServiceAccount
@@ -22,5 +26,5 @@ subjects:
     namespace: ollama
 roleRef:
   kind: Role
-  name: aether-pod-reader
+  name: aether
   apiGroup: rbac.authorization.k8s.io

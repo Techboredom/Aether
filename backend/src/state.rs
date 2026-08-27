@@ -2,20 +2,26 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use common::{PodEvent, PodInfo};
+use kube::Client;
+use sqlx::PgPool;
 use tokio::sync::{broadcast, RwLock};
 
 #[derive(Clone)]
 pub struct AppState {
     pub namespace: String,
+    pub client: Client,
+    pub pg: PgPool,
     pods: Arc<RwLock<HashMap<String, PodInfo>>>,
     events: broadcast::Sender<PodEvent>,
 }
 
 impl AppState {
-    pub fn new(namespace: String) -> Self {
+    pub fn new(namespace: String, client: Client, pg: PgPool) -> Self {
         let (events, _) = broadcast::channel(256);
         Self {
             namespace,
+            client,
+            pg,
             pods: Arc::new(RwLock::new(HashMap::new())),
             events,
         }
