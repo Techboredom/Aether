@@ -5,12 +5,13 @@ mod images;
 mod logs;
 mod resources;
 mod state;
+mod templates;
 mod watch;
 mod ws;
 
 use std::net::SocketAddr;
 
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::Router;
 use clap::Parser;
 use kube::Client;
@@ -66,6 +67,8 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/api/pods", get(ws::list_pods))
         .route("/api/images", get(images::list_images))
+        .route("/api/templates", get(templates::list_templates).post(templates::create_template))
+        .route("/api/templates/{id}", put(templates::update_template).delete(templates::delete_template))
         .route("/api/deployments", post(deployments::create_deployment))
         .route("/api/pods/{name}/logs", get(logs::get_pod_logs))
         .route("/api/pods/{name}/events", get(events::get_pod_events))

@@ -375,14 +375,85 @@ tbody tr:hover {
   flex-wrap: nowrap;
 }
 
+.env-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
 .env-row {
   display: flex;
   flex-wrap: wrap;
+  align-items: flex-end;
   gap: var(--space-3);
 }
 
 .env-row label {
   flex: 1 1 160px;
+}
+
+.deploy-form .env-row .icon-button,
+.deploy-form .add-row-button {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  padding: 9px 12px;
+  font-weight: 400;
+}
+
+.deploy-form .env-row .icon-button {
+  width: auto;
+  height: auto;
+  padding: 9px 12px;
+}
+
+.deploy-form .env-row .icon-button:hover,
+.deploy-form .add-row-button:hover {
+  color: var(--text-primary);
+  border-color: var(--text-muted);
+  filter: none;
+}
+
+.deploy-form .add-row-button {
+  align-self: flex-start;
+}
+
+.form-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.deploy-form .secondary-button {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-strong);
+}
+
+.deploy-form .secondary-button:hover {
+  color: var(--text-primary);
+  border-color: var(--text-muted);
+  filter: none;
+}
+
+.section-heading {
+  font-size: 14px;
+  font-weight: 600;
+  margin: var(--space-5) 0 0;
+}
+
+.table-actions {
+  display: flex;
+  gap: var(--space-2);
+  white-space: nowrap;
+}
+
+.table-actions .icon-button {
+  width: auto;
+  height: auto;
+  padding: 5px 10px;
+  font-size: 12px;
 }
 
 .deploy-form fieldset label {

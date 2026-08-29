@@ -1,19 +1,19 @@
-use common::{CreateDeploymentRequest, CreateDeploymentResponse, ImageEntry};
+use common::{CreateDeploymentRequest, CreateDeploymentResponse, ImageEntry, TemplateEntry};
 use gloo_net::http::Request;
 use leptos::prelude::*;
 use leptos::tachys::dom::event_target_value;
 use leptos::task::spawn_local;
 
-use crate::templates::{Template, CUSTOM_TEMPLATE_ID, TEMPLATES};
-
-const ENV_ROWS: usize = 3;
+use crate::env_editor::{EnvVars, EnvVarsEditor};
 
 #[component]
 pub fn CreateDeploymentTab() -> impl IntoView {
     let images: RwSignal<Vec<ImageEntry>> = RwSignal::new(Vec::new());
     let images_error = RwSignal::new(None::<String>);
+    let templates: RwSignal<Vec<TemplateEntry>> = RwSignal::new(Vec::new());
+    let templates_error = RwSignal::new(None::<String>);
 
-    let selected_template = RwSignal::new(CUSTOM_TEMPLATE_ID);
+    let selected_template_id = RwSignal::new(String::new());
 
     let name = RwSignal::new(String::new());
     let image = RwSignal::new(String::new());
@@ -25,10 +25,9 @@ pub fn CreateDeploymentTab() -> impl IntoView {
     let memory_limit = RwSignal::new(String::new());
     let accelerator_type = RwSignal::new(String::new());
     let accelerator_count = RwSignal::new(String::new());
-    let env_keys: [RwSignal<String>; ENV_ROWS] = std::array::from_fn(|_| RwSignal::new(String::new()));
-    let env_values: [RwSignal<String>; ENV_ROWS] = std::array::from_fn(|_| RwSignal::new(String::new()));
+    let env_vars = EnvVars::new();
     let args_text = RwSignal::new(String::new());
-    let notes = RwSignal::new(None::<&'static str>);
+    let notes = RwSignal::new(None::<String>);
 
     let submitting = RwSignal::new(false);
     let result: RwSignal<Option<Result<String, String>>> = RwSignal::new(None);
@@ -44,29 +43,33 @@ pub fn CreateDeploymentTab() -> impl IntoView {
         }
     });
 
-    let apply_template = move |t: &'static Template| {
-        selected_template.set(t.id);
-        notes.set(Some(t.notes));
-        name.set(t.id.to_string());
-        image.set(t.image.to_string());
-        container_port.set(t.port.map(|p| p.to_string()).unwrap_or_default());
-        cpu_request.set(t.cpu_request.to_string());
-        cpu_limit.set(t.cpu_limit.to_string());
-        memory_request.set(t.memory_request.to_string());
-        memory_limit.set(t.memory_limit.to_string());
-        accelerator_type.set(t.accelerator_type.to_string());
-        accelerator_count.set(if t.accelerator_count > 0 { t.accelerator_count.to_string() } else { String::new() });
-        for (i, key_signal) in env_keys.iter().enumerate() {
-            key_signal.set(t.env_keys.get(i).map(|s| s.to_string()).unwrap_or_default());
+    spawn_local(async move {
+        match Request::get("/api/templates").send().await {
+            Ok(resp) if resp.ok() => match resp.json::<Vec<TemplateEntry>>().await {
+                Ok(list) => templates.set(list),
+                Err(err) => templates_error.set(Some(format!("failed to parse template list: {err}"))),
+            },
+            Ok(resp) => templates_error.set(Some(format!("failed to load templates: HTTP {}", resp.status()))),
+            Err(err) => templates_error.set(Some(format!("failed to load templates: {err}"))),
         }
-        for value_signal in env_values.iter() {
-            value_signal.set(String::new());
-        }
+    });
+
+    let apply_template = move |t: &TemplateEntry| {
+        notes.set(if t.notes.trim().is_empty() { None } else { Some(t.notes.clone()) });
+        name.set(slugify(&t.name));
+        image.set(t.image.clone());
+        container_port.set(t.container_port.map(|p| p.to_string()).unwrap_or_default());
+        cpu_request.set(t.cpu_request.clone());
+        cpu_limit.set(t.cpu_limit.clone());
+        memory_request.set(t.memory_request.clone());
+        memory_limit.set(t.memory_limit.clone());
+        accelerator_type.set(t.accelerator_type.clone());
+        accelerator_count.set(t.accelerator_count.map(|c| c.to_string()).unwrap_or_default());
+        env_vars.set_from(&t.env);
         args_text.set(t.args.join("\n"));
     };
 
-    let select_custom = move |_| {
-        selected_template.set(CUSTOM_TEMPLATE_ID);
+    let reset_to_custom = move || {
         notes.set(None);
         name.set(String::new());
         image.set(String::new());
@@ -77,13 +80,21 @@ pub fn CreateDeploymentTab() -> impl IntoView {
         memory_limit.set(String::new());
         accelerator_type.set(String::new());
         accelerator_count.set(String::new());
-        for key_signal in env_keys.iter() {
-            key_signal.set(String::new());
-        }
-        for value_signal in env_values.iter() {
-            value_signal.set(String::new());
-        }
+        env_vars.set_from(&[]);
         args_text.set(String::new());
+    };
+
+    let on_template_change = move |ev: web_sys::Event| {
+        let value = event_target_value(&ev);
+        selected_template_id.set(value.clone());
+        if value.is_empty() {
+            reset_to_custom();
+            return;
+        }
+        if let Ok(id) = value.parse::<i32>()
+            && let Some(t) = templates.get().iter().find(|t| t.id == id) {
+                apply_template(t);
+            }
     };
 
     let on_submit = move |ev: web_sys::SubmitEvent| {
@@ -98,8 +109,6 @@ pub fn CreateDeploymentTab() -> impl IntoView {
         } else {
             accelerator_count.get().trim().parse::<i64>().ok()
         };
-        let env: Vec<(String, String)> =
-            env_keys.iter().zip(env_values.iter()).map(|(k, v)| (k.get().trim().to_string(), v.get())).collect();
         let args: Vec<String> = args_text.get().lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
 
         let req = CreateDeploymentRequest {
@@ -113,7 +122,7 @@ pub fn CreateDeploymentTab() -> impl IntoView {
             accelerator_type: if accel_type.is_empty() { None } else { Some(accel_type) },
             accelerator_count: accel_count,
             container_port: container_port.get().trim().parse().ok(),
-            env,
+            env: env_vars.to_pairs(),
             args,
         };
 
@@ -129,37 +138,21 @@ pub fn CreateDeploymentTab() -> impl IntoView {
     view! {
         <div class="tab-panel">
             {move || images_error.get().map(|msg| view! { <div class="error">{msg}</div> })}
-
-            <div class="template-picker">
-                <button
-                    type="button"
-                    class="tab-button"
-                    class:active=move || selected_template.get() == CUSTOM_TEMPLATE_ID
-                    on:click=select_custom
-                >
-                    "Custom"
-                </button>
-                {TEMPLATES
-                    .iter()
-                    .map(|t| {
-                        let id = t.id;
-                        view! {
-                            <button
-                                type="button"
-                                class="tab-button"
-                                class:active=move || selected_template.get() == id
-                                on:click=move |_| apply_template(t)
-                            >
-                                {t.label}
-                            </button>
-                        }
-                    })
-                    .collect::<Vec<_>>()}
-            </div>
-
-            {move || notes.get().map(|n| view! { <div class="template-notes">{n}</div> })}
+            {move || templates_error.get().map(|msg| view! { <div class="error">{msg}</div> })}
 
             <form class="deploy-form" on:submit=on_submit>
+                <label>
+                    "Template"
+                    <select prop:value=move || selected_template_id.get() on:change=on_template_change>
+                        <option value="">"Custom"</option>
+                        <For each=move || templates.get() key=|t| t.id let(t)>
+                            <option value=t.id.to_string()>{t.name.clone()}</option>
+                        </For>
+                    </select>
+                </label>
+
+                {move || notes.get().map(|n| view! { <div class="template-notes">{n}</div> })}
+
                 <label>
                     "Name"
                     <input
@@ -283,33 +276,7 @@ pub fn CreateDeploymentTab() -> impl IntoView {
 
                 <fieldset class="env-fieldset">
                     <legend>"Environment variables (optional)"</legend>
-                    {(0..ENV_ROWS)
-                        .map(|i| {
-                            let key_signal = env_keys[i];
-                            let value_signal = env_values[i];
-                            view! {
-                                <div class="env-row">
-                                    <label>
-                                        "Key"
-                                        <input
-                                            type="text"
-                                            placeholder="e.g. PASSWORD"
-                                            prop:value=move || key_signal.get()
-                                            on:input=move |ev| key_signal.set(event_target_value(&ev))
-                                        />
-                                    </label>
-                                    <label>
-                                        "Value"
-                                        <input
-                                            type="text"
-                                            prop:value=move || value_signal.get()
-                                            on:input=move |ev| value_signal.set(event_target_value(&ev))
-                                        />
-                                    </label>
-                                </div>
-                            }
-                        })
-                        .collect::<Vec<_>>()}
+                    <EnvVarsEditor vars=env_vars />
                 </fieldset>
 
                 <label>
@@ -340,6 +307,26 @@ pub fn CreateDeploymentTab() -> impl IntoView {
 fn non_empty(s: String) -> Option<String> {
     let trimmed = s.trim();
     if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+}
+
+/// Lowercase, alphanumeric-and-hyphen only — used to turn a template name
+/// like "JupyterLab" into a starting point for the deployment name field.
+fn slugify(s: &str) -> String {
+    let mut out = String::new();
+    let mut last_was_dash = false;
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            last_was_dash = false;
+        } else if !last_was_dash && !out.is_empty() {
+            out.push('-');
+            last_was_dash = true;
+        }
+    }
+    if out.ends_with('-') {
+        out.pop();
+    }
+    out
 }
 
 async fn submit(req: CreateDeploymentRequest) -> Result<String, String> {

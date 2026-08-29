@@ -57,6 +57,14 @@ pub fn accelerators(accelerators: &BTreeMap<String, i64>) -> String {
         .join(", ")
 }
 
+/// Renders a template's accelerator type/count as "amd.com/gpu ×1", or "—" if none.
+pub fn accelerator_summary(accelerator_type: &str, count: Option<i64>) -> String {
+    if accelerator_type.trim().is_empty() {
+        return "—".to_string();
+    }
+    format!("{accelerator_type} ×{}", count.unwrap_or(1))
+}
+
 /// Renders a kubectl-style compact age string (e.g. "3d", "5h12m", "45s") from an
 /// RFC 3339 timestamp, relative to the current time in the browser.
 pub fn age(start_time: Option<&str>) -> String {
