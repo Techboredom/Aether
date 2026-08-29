@@ -132,6 +132,7 @@ fn PodRow(pod: PodInfo, selected_pod: RwSignal<Option<String>>, is_admin: bool) 
     let row_name = pod.name.clone();
     let owner = pod.owner.clone().unwrap_or_else(|| "—".into());
     let credential = pod.credential.clone();
+    let proxy_path = pod.proxy_path.clone();
 
     view! {
         <tr class="clickable-row" on:click=move |_| selected_pod.set(Some(row_name.clone()))>
@@ -156,6 +157,19 @@ fn PodRow(pod: PodInfo, selected_pod: RwSignal<Option<String>>, is_admin: bool) 
                     Some(cred) => {
                         view! {
                             <div class="credential">
+                                {proxy_path.map(|path| {
+                                    view! {
+                                        <a
+                                            class="icon-button"
+                                            href=path
+                                            target="_blank"
+                                            title="Open — already logged in, no token needed"
+                                            on:click=|ev: leptos::ev::MouseEvent| ev.stop_propagation()
+                                        >
+                                            "Open"
+                                        </a>
+                                    }
+                                })}
                                 <span class="credential-key">{cred.env_key}</span>
                                 <code class="credential-value" title="Click to select, then copy">
                                     {cred.value}

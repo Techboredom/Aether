@@ -25,6 +25,7 @@ struct TemplateRow {
     args: Vec<String>,
     notes: String,
     secret_env_key: Option<String>,
+    proxy_enabled: bool,
 }
 
 impl From<TemplateRow> for TemplateEntry {
@@ -44,6 +45,7 @@ impl From<TemplateRow> for TemplateEntry {
             args: row.args,
             notes: row.notes,
             secret_env_key: row.secret_env_key,
+            proxy_enabled: row.proxy_enabled,
         }
     }
 }
@@ -51,7 +53,7 @@ impl From<TemplateRow> for TemplateEntry {
 // `SELECT_COLUMNS` is a compile-time constant, never user input, so interpolating it
 // into these queries with `AssertSqlSafe` below is not a SQL-injection risk.
 const SELECT_COLUMNS: &str = "id, name, image, container_port, cpu_request, cpu_limit, memory_request, \
-     memory_limit, accelerator_type, accelerator_count, env, args, notes, secret_env_key";
+     memory_limit, accelerator_type, accelerator_count, env, args, notes, secret_env_key, proxy_enabled";
 
 pub async fn list_templates(
     _user: CurrentUser,
@@ -70,8 +72,8 @@ pub async fn create_template(
     validate_request(&req)?;
     let sql = format!(
         "INSERT INTO templates (name, image, container_port, cpu_request, cpu_limit, memory_request, \
-         memory_limit, accelerator_type, accelerator_count, env, args, notes, secret_env_key) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
+         memory_limit, accelerator_type, accelerator_count, env, args, notes, secret_env_key, proxy_enabled) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) \
          RETURNING {SELECT_COLUMNS}"
     );
     let row: TemplateRow = sqlx::query_as(AssertSqlSafe(sql))
@@ -88,6 +90,7 @@ pub async fn create_template(
         .bind(&req.args)
         .bind(&req.notes)
         .bind(&req.secret_env_key)
+        .bind(req.proxy_enabled)
         .fetch_one(&state.pg)
         .await?;
     Ok(Json(row.into()))
@@ -103,8 +106,8 @@ pub async fn update_template(
     let sql = format!(
         "UPDATE templates SET name = $1, image = $2, container_port = $3, cpu_request = $4, cpu_limit = $5, \
          memory_request = $6, memory_limit = $7, accelerator_type = $8, accelerator_count = $9, env = $10, \
-         args = $11, notes = $12, secret_env_key = $13 \
-         WHERE id = $14 \
+         args = $11, notes = $12, secret_env_key = $13, proxy_enabled = $14 \
+         WHERE id = $15 \
          RETURNING {SELECT_COLUMNS}"
     );
     let row: Option<TemplateRow> = sqlx::query_as(AssertSqlSafe(sql))
@@ -121,6 +124,7 @@ pub async fn update_template(
         .bind(&req.args)
         .bind(&req.notes)
         .bind(&req.secret_env_key)
+        .bind(req.proxy_enabled)
         .bind(id)
         .fetch_optional(&state.pg)
         .await?;
@@ -160,6 +164,9 @@ fn validate_request(req: &SaveTemplateRequest) -> Result<(), ApiError> {
     }
     if let Some(key) = &req.secret_env_key {
         validate::env_key(key)?;
+    }
+    if req.proxy_enabled && req.secret_env_key.is_none() {
+        return Err(ApiError::BadRequest("proxy_enabled requires secret_env_key to be set".to_string()));
     }
     Ok(())
 }

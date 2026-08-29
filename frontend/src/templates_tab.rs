@@ -1,7 +1,7 @@
 use common::{SaveTemplateRequest, TemplateEntry};
 use gloo_net::http::Request;
 use leptos::prelude::*;
-use leptos::tachys::dom::event_target_value;
+use leptos::tachys::dom::{event_target_checked, event_target_value};
 use leptos::task::spawn_local;
 
 use crate::env_editor::{EnvVars, EnvVarsEditor};
@@ -26,6 +26,7 @@ pub fn TemplatesTab() -> impl IntoView {
     let args_text = RwSignal::new(String::new());
     let notes_text = RwSignal::new(String::new());
     let secret_env_key = RwSignal::new(String::new());
+    let proxy_enabled = RwSignal::new(false);
 
     let saving = RwSignal::new(false);
     let form_result: RwSignal<Option<Result<String, String>>> = RwSignal::new(None);
@@ -62,6 +63,7 @@ pub fn TemplatesTab() -> impl IntoView {
         args_text.set(String::new());
         notes_text.set(String::new());
         secret_env_key.set(String::new());
+        proxy_enabled.set(false);
     };
 
     let load_into_form = move |t: &TemplateEntry| {
@@ -79,6 +81,7 @@ pub fn TemplatesTab() -> impl IntoView {
         args_text.set(t.args.join("\n"));
         notes_text.set(t.notes.clone());
         secret_env_key.set(t.secret_env_key.clone().unwrap_or_default());
+        proxy_enabled.set(t.proxy_enabled);
         form_result.set(None);
     };
 
@@ -131,6 +134,7 @@ pub fn TemplatesTab() -> impl IntoView {
                 let key = secret_env_key.get().trim().to_string();
                 if key.is_empty() { None } else { Some(key) }
             },
+            proxy_enabled: proxy_enabled.get(),
         };
 
         let id = editing_id.get();
@@ -165,6 +169,7 @@ pub fn TemplatesTab() -> impl IntoView {
                             <th>"Memory"</th>
                             <th>"Accelerator"</th>
                             <th>"Secret"</th>
+                            <th>"Proxy"</th>
                             <th></th>
                         </tr>
                     </thead>
@@ -182,6 +187,7 @@ pub fn TemplatesTab() -> impl IntoView {
                                         <td>{format!("{} / {}", or_dash(&t.memory_request), or_dash(&t.memory_limit))}</td>
                                         <td>{format::accelerator_summary(&t.accelerator_type, t.accelerator_count)}</td>
                                         <td>{t.secret_env_key.clone().unwrap_or_else(|| "—".into())}</td>
+                                        <td>{if t.proxy_enabled { "yes" } else { "—" }}</td>
                                         <td class="table-actions">
                                             <button type="button" class="icon-button" on:click=move |_| load_into_form(&t_for_edit)>
                                                 "Edit"
@@ -346,6 +352,16 @@ pub fn TemplatesTab() -> impl IntoView {
                         prop:value=move || secret_env_key.get()
                         on:input=move |ev| secret_env_key.set(event_target_value(&ev))
                     />
+                </label>
+
+                <label class="checkbox">
+                    <input
+                        type="checkbox"
+                        disabled=move || secret_env_key.get().trim().is_empty()
+                        prop:checked=move || proxy_enabled.get()
+                        on:change=move |ev| proxy_enabled.set(event_target_checked(&ev))
+                    />
+                    "Proxy through Aether (no public LoadBalancer; requires a generated secret above)"
                 </label>
 
                 <div class="form-actions">

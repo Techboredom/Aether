@@ -51,6 +51,9 @@ pub async fn create_deployment(
     if let Some(key) = &req.generate_secret_for {
         validate::env_key(key)?;
     }
+    if req.enable_proxy && (req.generate_secret_for.is_none() || req.container_port.is_none()) {
+        return Err(ApiError::BadRequest("enable_proxy requires generate_secret_for and container_port".into()));
+    }
 
     let mut requests = BTreeMap::new();
     let mut limits = BTreeMap::new();
@@ -91,7 +94,15 @@ pub async fn create_deployment(
         env.push(EnvVar { name: key.clone(), value: Some(value.clone()), ..Default::default() });
         value
     });
-    let args: Vec<String> = req.args.iter().map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect();
+    // "{{name}}" is a generic placeholder any template's args can use to refer
+    // to the deployment's own (user-chosen) name, e.g. JupyterLab's
+    // `--ServerApp.base_url=/proxy/{{name}}/`.
+    let args: Vec<String> = req
+        .args
+        .iter()
+        .map(|a| a.trim().replace("{{name}}", &req.name))
+        .filter(|a| !a.is_empty())
+        .collect();
 
     // The selector must stay a fixed, minimal set of labels the pod template
     // always carries; `owner` rides along as an extra descriptive label on
@@ -146,9 +157,12 @@ pub async fn create_deployment(
     let name = created.metadata.name.unwrap_or(req.name);
 
     // No ingress controller in the cluster yet, so expose the app directly via
-    // its own LoadBalancer Service (MetalLB assigns it an external IP).
+    // its own LoadBalancer Service (MetalLB assigns it an external IP) —
+    // unless it's proxy-enabled, in which case Aether's own /proxy/ route is
+    // the only way in and no Service is needed at all (portforward reaches
+    // the pod directly through the API server connection).
     let mut service_name = None;
-    if let Some(port) = req.container_port {
+    if let (Some(port), false) = (req.container_port, req.enable_proxy) {
         let service = Service {
             metadata: ObjectMeta {
                 name: Some(name.clone()),
@@ -175,20 +189,26 @@ pub async fn create_deployment(
 
     if let (Some(key), Some(value)) = (&req.generate_secret_for, &generated_secret) {
         sqlx::query(
-            "INSERT INTO deployment_secrets (deployment_name, namespace, env_key, secret_value, owner_username) \
-             VALUES ($1, $2, $3, $4, $5) \
+            "INSERT INTO deployment_secrets \
+                (deployment_name, namespace, env_key, secret_value, owner_username, proxy_enabled, container_port) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7) \
              ON CONFLICT (deployment_name) DO UPDATE SET \
                 namespace = EXCLUDED.namespace, env_key = EXCLUDED.env_key, \
-                secret_value = EXCLUDED.secret_value, owner_username = EXCLUDED.owner_username",
+                secret_value = EXCLUDED.secret_value, owner_username = EXCLUDED.owner_username, \
+                proxy_enabled = EXCLUDED.proxy_enabled, container_port = EXCLUDED.container_port",
         )
         .bind(&name)
         .bind(&state.namespace)
         .bind(key)
         .bind(value)
         .bind(&user.username)
+        .bind(req.enable_proxy)
+        .bind(req.container_port)
         .execute(&state.pg)
         .await?;
     }
+
+    let proxy_path = req.enable_proxy.then(|| format!("/proxy/{name}/"));
 
     Ok(Json(CreateDeploymentResponse {
         name,
@@ -196,5 +216,6 @@ pub async fn create_deployment(
         service_name,
         container_port: req.container_port,
         secret_value: generated_secret,
+        proxy_path,
     }))
 }

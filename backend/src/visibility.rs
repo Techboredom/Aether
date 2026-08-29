@@ -28,9 +28,11 @@ pub async fn visible_to(pods: Vec<PodInfo>, user: &CurrentUser, pg: &PgPool) -> 
         }
     };
     for pod in &mut visible {
-        if let Some(name) = &pod.deployment_name {
-            pod.credential = secrets.get(name).cloned();
-        }
+        if let Some(name) = &pod.deployment_name
+            && let Some(stored) = secrets.get(name) {
+                pod.credential = Some(stored.credential.clone());
+                pod.proxy_path = stored.proxy_enabled.then(|| format!("/proxy/{name}/"));
+            }
     }
     visible
 }
@@ -41,26 +43,37 @@ pub fn can_see(pod: &PodInfo, user: &CurrentUser) -> bool {
     user.role == Role::Admin || pod.owner.as_deref() == Some(user.username.as_str())
 }
 
-/// Attaches `pod`'s stored credential in place, if it has one. Used for
-/// single live Upsert events, where a full batch lookup would be overkill.
+/// Attaches `pod`'s stored credential (and proxy path, if proxy-enabled) in
+/// place. Used for single live Upsert events, where a full batch lookup
+/// would be overkill.
 pub async fn attach_credential(pod: &mut PodInfo, pg: &PgPool) {
     let Some(name) = &pod.deployment_name else { return };
-    if let Ok(Some((env_key, value))) =
-        sqlx::query_as::<_, (String, String)>("SELECT env_key, secret_value FROM deployment_secrets WHERE deployment_name = $1")
-            .bind(name)
-            .fetch_optional(pg)
-            .await
+    if let Ok(Some((env_key, value, proxy_enabled))) = sqlx::query_as::<_, (String, String, bool)>(
+        "SELECT env_key, secret_value, proxy_enabled FROM deployment_secrets WHERE deployment_name = $1",
+    )
+    .bind(name)
+    .fetch_optional(pg)
+    .await
     {
         pod.credential = Some(PodCredential { env_key, value });
+        pod.proxy_path = proxy_enabled.then(|| format!("/proxy/{name}/"));
     }
 }
 
-async fn load_secrets(pg: &PgPool, deployment_names: &[String]) -> Result<HashMap<String, PodCredential>, sqlx::Error> {
-    let rows: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT deployment_name, env_key, secret_value FROM deployment_secrets WHERE deployment_name = ANY($1)",
+struct StoredSecret {
+    credential: PodCredential,
+    proxy_enabled: bool,
+}
+
+async fn load_secrets(pg: &PgPool, deployment_names: &[String]) -> Result<HashMap<String, StoredSecret>, sqlx::Error> {
+    let rows: Vec<(String, String, String, bool)> = sqlx::query_as(
+        "SELECT deployment_name, env_key, secret_value, proxy_enabled FROM deployment_secrets WHERE deployment_name = ANY($1)",
     )
     .bind(deployment_names)
     .fetch_all(pg)
     .await?;
-    Ok(rows.into_iter().map(|(name, env_key, value)| (name, PodCredential { env_key, value })).collect())
+    Ok(rows
+        .into_iter()
+        .map(|(name, env_key, value, proxy_enabled)| (name, StoredSecret { credential: PodCredential { env_key, value }, proxy_enabled }))
+        .collect())
 }

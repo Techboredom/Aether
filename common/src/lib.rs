@@ -31,6 +31,10 @@ pub struct PodInfo {
     /// token, RStudio password, vLLM API key, ...), if its template has one.
     /// Only populated for pods the requester is allowed to see.
     pub credential: Option<PodCredential>,
+    /// If its template is proxy-enabled, the root-relative path
+    /// (`/proxy/<deployment-name>/`) that opens it through Aether itself
+    /// with the credential already injected — no login prompt, no public IP.
+    pub proxy_path: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -108,6 +112,13 @@ pub struct CreateDeploymentRequest {
     /// template's `secret_env_key`.
     #[serde(default)]
     pub generate_secret_for: Option<String>,
+    /// If set, no public Service is created — the app is only reachable via
+    /// Aether's own `/proxy/<name>/` route, which injects the generated
+    /// credential automatically. Requires `generate_secret_for` and
+    /// `container_port` to both be set. Comes from the selected template's
+    /// `proxy_enabled`.
+    #[serde(default)]
+    pub enable_proxy: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -119,6 +130,9 @@ pub struct CreateDeploymentResponse {
     pub container_port: Option<i32>,
     /// The generated value, if `generate_secret_for` was set.
     pub secret_value: Option<String>,
+    /// Present if `enable_proxy` was set — the root-relative path that opens
+    /// this deployment through Aether with the credential already injected.
+    pub proxy_path: Option<String>,
 }
 
 /// A Kubernetes Event involving a specific pod (scheduling failures, image pull
@@ -159,6 +173,11 @@ pub struct TemplateEntry {
     /// var automatically instead of showing it as an editable field — e.g.
     /// JupyterLab's `"JUPYTER_TOKEN"`, RStudio's `"PASSWORD"`.
     pub secret_env_key: Option<String>,
+    /// If true, launching this template skips the public LoadBalancer
+    /// Service and is only reachable via Aether's `/proxy/<name>/` route
+    /// instead, with `secret_env_key`'s generated value injected
+    /// automatically — no separate login. Requires `secret_env_key` to be set.
+    pub proxy_enabled: bool,
 }
 
 /// Submitted by the Templates admin tab to create or update a template.
@@ -177,6 +196,7 @@ pub struct SaveTemplateRequest {
     pub args: Vec<String>,
     pub notes: String,
     pub secret_env_key: Option<String>,
+    pub proxy_enabled: bool,
 }
 
 /// The two account classes. Admins can manage templates and accounts; both
