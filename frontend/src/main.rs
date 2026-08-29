@@ -117,7 +117,7 @@ fn AppShell(user: UserInfo, current_user: RwSignal<Option<UserInfo>>) -> impl In
             </header>
 
             <div class:hidden=move || tab.get() != Tab::Pods>
-                <PodsTab />
+                <PodsTab is_admin=is_admin />
             </div>
             <div class:hidden=move || tab.get() != Tab::Launch>
                 <CreateDeploymentTab />

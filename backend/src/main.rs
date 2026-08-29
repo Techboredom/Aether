@@ -9,6 +9,7 @@ mod state;
 mod templates;
 mod users;
 mod validate;
+mod visibility;
 mod watch;
 mod ws;
 

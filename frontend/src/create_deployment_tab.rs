@@ -28,6 +28,7 @@ pub fn CreateDeploymentTab() -> impl IntoView {
     let env_vars = EnvVars::new();
     let args_text = RwSignal::new(String::new());
     let notes = RwSignal::new(None::<String>);
+    let secret_env_key = RwSignal::new(None::<String>);
 
     let submitting = RwSignal::new(false);
     let result: RwSignal<Option<Result<String, String>>> = RwSignal::new(None);
@@ -65,8 +66,12 @@ pub fn CreateDeploymentTab() -> impl IntoView {
         memory_limit.set(t.memory_limit.clone());
         accelerator_type.set(t.accelerator_type.clone());
         accelerator_count.set(t.accelerator_count.map(|c| c.to_string()).unwrap_or_default());
-        env_vars.set_from(&t.env);
+        // A secret env var is auto-generated at launch, not typed in — never show it as an editable row.
+        let env: Vec<(String, String)> =
+            t.env.iter().filter(|(k, _)| Some(k) != t.secret_env_key.as_ref()).cloned().collect();
+        env_vars.set_from(&env);
         args_text.set(t.args.join("\n"));
+        secret_env_key.set(t.secret_env_key.clone());
     };
 
     let reset_to_custom = move || {
@@ -82,6 +87,7 @@ pub fn CreateDeploymentTab() -> impl IntoView {
         accelerator_count.set(String::new());
         env_vars.set_from(&[]);
         args_text.set(String::new());
+        secret_env_key.set(None);
     };
 
     let on_template_change = move |ev: web_sys::Event| {
@@ -124,6 +130,7 @@ pub fn CreateDeploymentTab() -> impl IntoView {
             container_port: container_port.get().trim().parse().ok(),
             env: env_vars.to_pairs(),
             args,
+            generate_secret_for: secret_env_key.get(),
         };
 
         submitting.set(true);
@@ -152,6 +159,19 @@ pub fn CreateDeploymentTab() -> impl IntoView {
                 </label>
 
                 {move || notes.get().map(|n| view! { <div class="template-notes">{n}</div> })}
+                {move || {
+                    secret_env_key
+                        .get()
+                        .map(|key| {
+                            view! {
+                                <div class="template-notes">
+                                    {format!(
+                                        "A random {key} will be generated automatically and shown here after launch — no need to set one yourself.",
+                                    )}
+                                </div>
+                            }
+                        })
+                }}
 
                 <label>
                     "Name"
@@ -351,6 +371,9 @@ async fn submit(req: CreateDeploymentRequest) -> Result<String, String> {
                 " Exposed via Service \"{service}\" on port {port} — check `kubectl get svc -n {}` for its external IP.",
                 created.namespace
             ));
+        }
+        if let Some(secret) = created.secret_value {
+            msg.push_str(&format!(" Generated credential: {secret} (also shown on the Pods tab)."));
         }
         Ok(msg)
     } else {

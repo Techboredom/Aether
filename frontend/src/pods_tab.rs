@@ -9,7 +9,7 @@ use crate::pod_detail::PodDetailPanel;
 use crate::{format, ws};
 
 #[component]
-pub fn PodsTab() -> impl IntoView {
+pub fn PodsTab(is_admin: bool) -> impl IntoView {
     let pods: RwSignal<HashMap<String, PodInfo>> = RwSignal::new(HashMap::new());
     let connected = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
@@ -89,6 +89,7 @@ pub fn PodsTab() -> impl IntoView {
                     <thead>
                         <tr>
                             <th>"Name"</th>
+                            <th class:hidden=!is_admin>"Owner"</th>
                             <th>"Status"</th>
                             <th>"Node"</th>
                             <th>"Restarts"</th>
@@ -98,11 +99,12 @@ pub fn PodsTab() -> impl IntoView {
                             <th>"Memory request"</th>
                             <th>"Memory limit"</th>
                             <th>"Accelerators"</th>
+                            <th>"Credential"</th>
                         </tr>
                     </thead>
                     <tbody>
                         <For each=move || rows.get() key=|pod| pod.name.clone() let(pod)>
-                            <PodRow pod=pod selected_pod=selected_pod />
+                            <PodRow pod=pod selected_pod=selected_pod is_admin=is_admin />
                         </For>
                     </tbody>
                 </table>
@@ -122,16 +124,19 @@ pub fn PodsTab() -> impl IntoView {
 }
 
 #[component]
-fn PodRow(pod: PodInfo, selected_pod: RwSignal<Option<String>>) -> impl IntoView {
+fn PodRow(pod: PodInfo, selected_pod: RwSignal<Option<String>>, is_admin: bool) -> impl IntoView {
     let ready = format!("{}/{}", pod.ready_containers, pod.total_containers);
     let accelerators = format::accelerators(&pod.accelerators);
     let badge_class = format!("badge {}", format::phase_class(&pod.phase));
     let reason = format::pod_reason(&pod.containers);
     let row_name = pod.name.clone();
+    let owner = pod.owner.clone().unwrap_or_else(|| "—".into());
+    let credential = pod.credential.clone();
 
     view! {
         <tr class="clickable-row" on:click=move |_| selected_pod.set(Some(row_name.clone()))>
             <td>{pod.name.clone()}</td>
+            <td class:hidden=!is_admin>{owner}</td>
             <td>
                 <span class=badge_class>{pod.phase.clone()}</span>
                 " "
@@ -146,6 +151,22 @@ fn PodRow(pod: PodInfo, selected_pod: RwSignal<Option<String>>) -> impl IntoView
             <td>{format::bytes(pod.memory_request_bytes)}</td>
             <td>{format::bytes(pod.memory_limit_bytes)}</td>
             <td>{accelerators}</td>
+            <td>
+                {match credential {
+                    Some(cred) => {
+                        view! {
+                            <div class="credential">
+                                <span class="credential-key">{cred.env_key}</span>
+                                <code class="credential-value" title="Click to select, then copy">
+                                    {cred.value}
+                                </code>
+                            </div>
+                        }
+                            .into_any()
+                    }
+                    None => view! { "—" }.into_any(),
+                }}
+            </td>
         </tr>
     }
 }

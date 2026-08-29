@@ -114,12 +114,19 @@ pub fn bounded_list(field: &str, items: &[impl AsRef<str>], max_items: usize, ma
     Ok(())
 }
 
+/// Also doubles as a Kubernetes label *value* (the `aether.io/owner` label
+/// tracking who launched a Deployment), hence the stricter start/end rule
+/// beyond just "printable and short".
 pub fn username(value: &str) -> Result<(), ApiError> {
     if value.len() < 3 || value.len() > 32 {
         return Err(bad("username", "must be 3-32 characters"));
     }
     if !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') {
         return Err(bad("username", "must contain only letters, digits, '.', '_', or '-'"));
+    }
+    let bytes = value.as_bytes();
+    if !bytes[0].is_ascii_alphanumeric() || !bytes[bytes.len() - 1].is_ascii_alphanumeric() {
+        return Err(bad("username", "must start and end with a letter or digit"));
     }
     Ok(())
 }

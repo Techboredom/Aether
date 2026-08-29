@@ -20,6 +20,23 @@ pub struct PodInfo {
     pub memory_limit_bytes: Option<i64>,
     /// e.g. "nvidia.com/gpu" -> 1, "amd.com/gpu" -> 2, summed across containers.
     pub accelerators: BTreeMap<String, i64>,
+    /// Username of whoever launched this pod via the Launch tab, if any
+    /// (pods that predate this feature, or weren't launched through Aether,
+    /// have no owner label and so show `None`).
+    pub owner: Option<String>,
+    /// The stable Deployment name (the `app` label), unlike the pod's own
+    /// name which gets a random suffix and changes across restarts.
+    pub deployment_name: Option<String>,
+    /// The auto-generated login credential for this instance (JupyterLab
+    /// token, RStudio password, vLLM API key, ...), if its template has one.
+    /// Only populated for pods the requester is allowed to see.
+    pub credential: Option<PodCredential>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PodCredential {
+    pub env_key: String,
+    pub value: String,
 }
 
 /// Per-container status, surfaced so the UI can explain *why* a pod isn't healthy
@@ -85,6 +102,12 @@ pub struct CreateDeploymentRequest {
     /// Extra container command-line arguments (e.g. `--model=...` for vLLM/SGLang).
     #[serde(default)]
     pub args: Vec<String>,
+    /// If set, the backend generates a random value and sets it as this env
+    /// var (overriding any same-keyed entry in `env`), instead of the user
+    /// typing one in — e.g. `"JUPYTER_TOKEN"`. Comes from the selected
+    /// template's `secret_env_key`.
+    #[serde(default)]
+    pub generate_secret_for: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -94,6 +117,8 @@ pub struct CreateDeploymentResponse {
     /// Present if `container_port` was set and a matching Service was created.
     pub service_name: Option<String>,
     pub container_port: Option<i32>,
+    /// The generated value, if `generate_secret_for` was set.
+    pub secret_value: Option<String>,
 }
 
 /// A Kubernetes Event involving a specific pod (scheduling failures, image pull
@@ -130,6 +155,10 @@ pub struct TemplateEntry {
     pub env: Vec<(String, String)>,
     pub args: Vec<String>,
     pub notes: String,
+    /// If set, launching this template generates a random value for this env
+    /// var automatically instead of showing it as an editable field — e.g.
+    /// JupyterLab's `"JUPYTER_TOKEN"`, RStudio's `"PASSWORD"`.
+    pub secret_env_key: Option<String>,
 }
 
 /// Submitted by the Templates admin tab to create or update a template.
@@ -147,6 +176,7 @@ pub struct SaveTemplateRequest {
     pub env: Vec<(String, String)>,
     pub args: Vec<String>,
     pub notes: String,
+    pub secret_env_key: Option<String>,
 }
 
 /// The two account classes. Admins can manage templates and accounts; both

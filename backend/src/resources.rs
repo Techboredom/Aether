@@ -4,11 +4,18 @@ use common::{ContainerStatusInfo, PodInfo};
 use k8s_openapi::api::core::v1::{ContainerStatus, Pod};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 
+/// Label set on launched Deployments/pods/Services recording who launched
+/// them, via `CreateDeploymentRequest` — see `backend/src/deployments.rs`.
+pub const OWNER_LABEL: &str = "aether.io/owner";
+
 /// Converts a Kubernetes `Pod` into our slimmed-down `PodInfo`, aggregating
 /// resource requests/limits (and accelerator resources) across all containers.
 pub fn pod_to_info(pod: &Pod) -> PodInfo {
     let name = pod.metadata.name.clone().unwrap_or_default();
     let namespace = pod.metadata.namespace.clone().unwrap_or_default();
+    let labels = pod.metadata.labels.as_ref();
+    let owner = labels.and_then(|l| l.get(OWNER_LABEL)).cloned();
+    let deployment_name = labels.and_then(|l| l.get("app")).cloned();
 
     let spec = pod.spec.as_ref();
     let status = pod.status.as_ref();
@@ -89,6 +96,9 @@ pub fn pod_to_info(pod: &Pod) -> PodInfo {
         memory_request_bytes,
         memory_limit_bytes,
         accelerators,
+        owner,
+        deployment_name,
+        credential: None,
     }
 }
 
