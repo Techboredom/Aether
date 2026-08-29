@@ -1,11 +1,11 @@
 # Aether
 
-A dashboard for a Kubernetes namespace, with two tabs. It's the web-interface
-slice of the broader platform described in `SPEC.md` — the Intelligence
-Layer (LLM engines) and Interface Layer (IDEs) as launchable workloads —
-scoped down to what's actually buildable today: this cluster has no ingress
-controller or StorageClass yet, so there's no Gateway layer or persistent
-storage (see "Status & known limitations" below).
+A dashboard for a Kubernetes namespace, with three tabs. It's the
+web-interface slice of the broader platform described in `SPEC.md` — the
+Intelligence Layer (LLM engines) and Interface Layer (IDEs) as launchable
+workloads — scoped down to what's actually buildable today: this cluster has
+no ingress controller or StorageClass yet, so there's no Gateway layer or
+persistent storage (see "Status & known limitations" below).
 
 - **Pods** — shows the running pods live, with their basic resource info:
   CPU/memory requests and limits, accelerators (GPUs, etc.), status, node,
@@ -15,17 +15,22 @@ storage (see "Status & known limitations" below).
   picker, tail length, previous-container logs for ones that crashed).
 - **Launch** — creates a `Deployment` (and, if a container port is given, a
   matching `LoadBalancer` Service, since there's no ingress) in that
-  namespace. Either pick a template — **Ollama, vLLM, SGLang** (Intelligence
-  Layer) or **JupyterLab, RStudio** (Interface Layer) — which pre-fills a
-  known image, port, resource sizing, GPU defaults, and any required env
-  vars/args, or start from **Custom** and pick any image from the
-  Postgres-backed catalog. Every pre-filled field stays editable.
+  namespace. The form's first field is a **Template** dropdown — Ollama,
+  vLLM, SGLang (Intelligence Layer) or JupyterLab, RStudio (Interface
+  Layer), or **Custom** — which pre-fills image, port, resource sizing, GPU
+  defaults, and any default env vars/args for that template. Every
+  pre-filled field stays editable, and Custom picks any image from the
+  Postgres-backed image catalog instead.
+- **Templates** — basic admin CRUD for the templates the Launch tab offers:
+  a table of existing templates (edit/delete) and a form to add a new one
+  (same fields as a template pre-fills into Launch, plus notes shown when
+  it's selected there).
 
 - **Backend**: Rust, [Axum](https://github.com/tokio-rs/axum) +
   [kube-rs](https://kube.rs) + [sqlx](https://github.com/launchbadge/sqlx)
   (Postgres). Watches one namespace via the Kubernetes watch API and serves a
   REST snapshot plus a WebSocket that pushes live pod updates; also serves the
-  image catalog and creates Deployments on request.
+  image catalog, the template catalog, and creates Deployments on request.
 - **Frontend**: Rust, [Leptos](https://leptos.dev) (client-side, compiled to
   WASM with [Trunk](https://trunkrs.dev)). Loads the initial pod snapshot over
   REST, then stays in sync over the WebSocket.
@@ -34,12 +39,13 @@ storage (see "Status & known limitations" below).
 ## Layout
 
 ```
-common/                    Shared types (PodInfo, PodEvent, ImageEntry, CreateDeploymentRequest, ...)
-backend/                   Axum server, kube-rs watcher, sqlx/Postgres image catalog
+common/                    Shared types (PodInfo, PodEvent, ImageEntry, TemplateEntry, CreateDeploymentRequest, ...)
+backend/                   Axum server, kube-rs watcher, sqlx/Postgres image + template catalogs
 backend/migrations/        sqlx migrations, auto-run on startup
 frontend/src/pods_tab.rs   Pods tab + detail panel
-frontend/src/create_deployment_tab.rs   Launch tab (templates + custom form)
-frontend/src/templates.rs  Hardcoded workload templates (Ollama/vLLM/SGLang/JupyterLab/RStudio)
+frontend/src/create_deployment_tab.rs   Launch tab (template dropdown + form)
+frontend/src/templates_tab.rs   Templates admin tab (CRUD)
+frontend/src/env_editor.rs      Shared add/remove env-var-row widget (Launch + Templates)
 k8s/                       Kubernetes manifests to deploy the dashboard itself
 Dockerfile                 Multi-stage build: compiles both crates, ships a distroless image
 .forgejo/                  Forgejo Actions workflow that builds and pushes the image
@@ -86,23 +92,27 @@ All flags can also be set as environment variables:
 | `--namespace` / `NAMESPACE` | *(required)* | Namespace to watch and to create Deployments in |
 | `--bind-addr` / `BIND_ADDR` | `0.0.0.0:3000` | Address the HTTP server binds to |
 | `--static-dir` / `STATIC_DIR` | `frontend/dist` | Directory of the built frontend to serve |
-| `--database-url` / `DATABASE_URL` | *(required)* | Postgres connection string for the image catalog |
+| `--database-url` / `DATABASE_URL` | *(required)* | Postgres connection string for the image and template catalogs |
 
 ### Endpoints
 
 - `GET /api/pods` — JSON snapshot of the current pods in the watched namespace
 - `GET /ws` — WebSocket; sends a full snapshot on connect, then `upsert`/`delete` events as pods change
 - `GET /api/images` — JSON list of catalog entries from the `images` table (id, name, image, description)
+- `GET /api/templates` — JSON list of templates (see "Templates catalog" below)
+- `POST /api/templates` / `PUT /api/templates/{id}` — create/update a template (Templates admin tab). Body is a `TemplateEntry` minus `id`: `{name, image, container_port, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, env, args, notes}` — only `name`/`image` are required, everything else defaults to empty/`null`.
+- `DELETE /api/templates/{id}` — delete a template
 - `POST /api/deployments` — creates a `Deployment` in the watched namespace, and if `container_port` is set, also a `LoadBalancer` Service exposing it (no ingress controller in the cluster, so this is how a launched app becomes reachable). Body: `{name, image, replicas, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, container_port, env, args}` — everything except `name`/`image`/`replicas` is optional; `env` is `[[key, value], ...]` pairs (entries with an empty value are dropped, so an image's own default behavior — e.g. an auto-generated password logged at startup — still applies unless you set one); `args` is a list of container command-line arguments. Response adds `service_name`/`container_port` (both `null` if no port was given).
 - `GET /api/pods/{name}/logs?container=&tail_lines=&previous=` — plain-text container logs (`container` defaults to the pod's only container if it has one; `tail_lines` defaults to 500; `previous=true` gets the last terminated instance's logs, for a crashed container)
 - `GET /api/pods/{name}/events` — JSON list of Kubernetes Events involving that pod (`type_`, `reason`, `message`, `count`, `last_seen`), most recent first — note the apiserver's default Event TTL is short (commonly ~1h), so older pods often have none left
 - `GET /*` — serves the built frontend (`index.html`, JS, WASM, CSS)
 
-## Image catalog (Postgres)
+## Image and template catalogs (Postgres)
 
 The `images` table (schema in `backend/migrations/0001_create_images.sql`,
 applied automatically on startup via `sqlx::migrate!`) backs the image
-catalog used by "Custom" mode on the Launch tab:
+catalog used by "Custom" mode on the Launch tab. There's no admin UI for it
+yet (unlike templates, below) — add entries with plain SQL:
 
 ```sql
 CREATE TABLE images (
@@ -114,13 +124,39 @@ CREATE TABLE images (
 );
 ```
 
-There's no admin UI for it yet — add entries with plain SQL against whatever
-Postgres instance `DATABASE_URL` points at:
-
 ```sql
 INSERT INTO images (name, image, description) VALUES
   ('Ollama (ROCm)', 'ollama/ollama:rocm', 'Ollama with AMD ROCm GPU support');
 ```
+
+The `templates` table (schema + seed data in
+`backend/migrations/0002_create_templates.sql`) backs both the **Template**
+dropdown on the Launch tab and the **Templates** admin tab, which is a full
+CRUD UI for it — no need to touch SQL directly unless you're restoring/
+scripting data:
+
+```sql
+CREATE TABLE templates (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    image TEXT NOT NULL,
+    container_port INTEGER,
+    cpu_request TEXT NOT NULL DEFAULT '',
+    cpu_limit TEXT NOT NULL DEFAULT '',
+    memory_request TEXT NOT NULL DEFAULT '',
+    memory_limit TEXT NOT NULL DEFAULT '',
+    accelerator_type TEXT NOT NULL DEFAULT '',
+    accelerator_count BIGINT,
+    env JSONB NOT NULL DEFAULT '[]',    -- [["KEY", "default value"], ...]
+    args TEXT[] NOT NULL DEFAULT '{}',  -- ["--model=...", ...]
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+It ships seeded with the same five templates (Ollama, vLLM, SGLang,
+JupyterLab, RStudio) that used to be hardcoded in the frontend — edit or
+delete them from the Templates tab like any other row.
 
 ## Building the container image
 
@@ -233,10 +269,14 @@ To watch a namespace other than `ollama`, either:
   random one, visible only in the pod's logs — still no network-level
   restriction on who can attempt to reach the login page once the Service
   gets an external IP).
-- The Create Deployment form does not sanitize CPU/memory quantity strings
+- The Launch and Templates forms don't sanitize CPU/memory quantity strings
   beyond checking they're non-empty — malformed values are rejected by the
   Kubernetes API server itself (returned to the UI as an error), not
   pre-validated client- or server-side.
+- The Templates admin tab has no access control of its own — anyone who can
+  reach the dashboard can create, edit, or delete templates, including their
+  command-line `args` (which get passed straight to the container on
+  launch). There's no separate "admin" role; this app has one trust level.
 - The container runs as a non-root user with a read-only root filesystem and
   all Linux capabilities dropped.
 - `CorsLayer::permissive()` is enabled on the backend to make local `trunk
@@ -247,11 +287,12 @@ To watch a namespace other than `ollama`, either:
 
 Everything above is implemented and has been exercised against the real
 cluster (not just locally built) — including the failure-diagnosis path
-against a pod that had genuinely been `Failed` for two weeks, and the
-Launch tab's port/env/args/Service wiring verified with real throwaway
-Deployments (one confirmed via its own container logs: args were passed
-through to the container and it ran and printed them). Known gaps, in case
-they matter for what you do next:
+against a pod that had genuinely been `Failed` for two weeks, the Launch
+tab's port/env/args/Service wiring verified with real throwaway Deployments
+(one confirmed via its own container logs: args were passed through to the
+container and it ran and printed them), and full template CRUD (create,
+edit, delete, and launching from a DB-backed template) exercised against a
+throwaway Postgres. Known gaps, in case they matter for what you do next:
 
 - **This is a scoped-down slice of `SPEC.md`, not the whole thing.** No
   ingress controller and no StorageClass exist in this cluster yet, so
@@ -260,9 +301,6 @@ they matter for what you do next:
   multi-tenancy, HPA, and ArgoCD/GitOps roadmap items are entirely
   unaddressed; this only covers "deploy a single-namespace workload from a
   template."
-- **Templates are hardcoded** in `frontend/src/templates.rs`, not
-  admin-editable or DB-backed like the image catalog. Adding a new
-  template means a code change + rebuild.
 - **vLLM/SGLang templates haven't been launched for real** — verified via
   a lightweight substitute (nginx/busybox) exercising the same code path
   (port/env/args/Service), not by actually pulling and running the
@@ -276,9 +314,11 @@ they matter for what you do next:
 - **No in-cluster Postgres.** `DATABASE_URL` currently has to point at a
   Postgres you already run somewhere; there's no `k8s/postgres.yaml`. Add
   one if you want this to be fully self-contained.
-- **No admin UI for the image catalog** — entries are added with raw SQL
-  (see "Image catalog" above). Fine for a handful of images, less so at
-  scale.
+- **No admin UI for the image catalog** (only for templates) — entries are
+  added with raw SQL (see "Image and template catalogs" above). Fine for a
+  handful of images, less so at scale.
+- **No confirmation on template edits**, only on delete — saving over an
+  existing template's fields is immediate.
 - **Single namespace only**, fixed at deploy time via the pod's own
   namespace. No in-app namespace switcher; watching multiple namespaces
   means deploying multiple copies (see "Watching a different namespace").

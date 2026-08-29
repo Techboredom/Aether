@@ -108,3 +108,43 @@ pub struct PodEventInfo {
     /// RFC3339 timestamp of the most recent occurrence, if known.
     pub last_seen: Option<String>,
 }
+
+/// A workload template (Ollama, JupyterLab, etc.), stored in the `templates`
+/// table and managed from the Templates admin tab. Selecting one on the
+/// Launch tab pre-fills a `CreateDeploymentRequest` with these values; every
+/// field stays editable afterward.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TemplateEntry {
+    pub id: i32,
+    pub name: String,
+    pub image: String,
+    pub container_port: Option<i32>,
+    pub cpu_request: String,
+    pub cpu_limit: String,
+    pub memory_request: String,
+    pub memory_limit: String,
+    pub accelerator_type: String,
+    pub accelerator_count: Option<i64>,
+    /// `(key, value)` pairs. A blank value is scaffolding for the launcher to
+    /// fill in — see `CreateDeploymentRequest::env`.
+    pub env: Vec<(String, String)>,
+    pub args: Vec<String>,
+    pub notes: String,
+}
+
+/// Submitted by the Templates admin tab to create or update a template.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SaveTemplateRequest {
+    pub name: String,
+    pub image: String,
+    pub container_port: Option<i32>,
+    pub cpu_request: String,
+    pub cpu_limit: String,
+    pub memory_request: String,
+    pub memory_limit: String,
+    pub accelerator_type: String,
+    pub accelerator_count: Option<i64>,
+    pub env: Vec<(String, String)>,
+    pub args: Vec<String>,
+    pub notes: String,
+}
