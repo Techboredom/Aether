@@ -4,13 +4,14 @@ use axum::response::IntoResponse;
 use axum::Json;
 use common::{PodEvent, PodInfo};
 
+use crate::auth::CurrentUser;
 use crate::state::AppState;
 
-pub async fn list_pods(State(state): State<AppState>) -> Json<Vec<PodInfo>> {
+pub async fn list_pods(_user: CurrentUser, State(state): State<AppState>) -> Json<Vec<PodInfo>> {
     Json(state.snapshot().await)
 }
 
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+pub async fn ws_handler(_user: CurrentUser, ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 

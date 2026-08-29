@@ -158,6 +158,9 @@ pub fn CreateDeploymentTab() -> impl IntoView {
                     <input
                         type="text"
                         required=true
+                        maxlength="63"
+                        pattern="[a-z0-9]([-a-z0-9]*[a-z0-9])?"
+                        title="Lowercase alphanumeric characters or '-', starting and ending with a letter or digit"
                         prop:value=move || name.get()
                         on:input=move |ev| name.set(event_target_value(&ev))
                     />
@@ -169,6 +172,7 @@ pub fn CreateDeploymentTab() -> impl IntoView {
                         type="text"
                         list="image-catalog"
                         required=true
+                        maxlength="512"
                         placeholder="e.g. nginx:stable"
                         prop:value=move || image.get()
                         on:input=move |ev| image.set(event_target_value(&ev))
@@ -196,6 +200,7 @@ pub fn CreateDeploymentTab() -> impl IntoView {
                     <input
                         type="number"
                         min="1"
+                        max="65535"
                         step="1"
                         placeholder="e.g. 8080 — creates a LoadBalancer Service"
                         prop:value=move || container_port.get()
