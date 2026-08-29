@@ -1,6 +1,11 @@
 # Aether
 
-A small dashboard for a Kubernetes namespace, with two tabs:
+A dashboard for a Kubernetes namespace, with two tabs. It's the web-interface
+slice of the broader platform described in `SPEC.md` — the Intelligence
+Layer (LLM engines) and Interface Layer (IDEs) as launchable workloads —
+scoped down to what's actually buildable today: this cluster has no ingress
+controller or StorageClass yet, so there's no Gateway layer or persistent
+storage (see "Status & known limitations" below).
 
 - **Pods** — shows the running pods live, with their basic resource info:
   CPU/memory requests and limits, accelerators (GPUs, etc.), status, node,
@@ -8,10 +13,13 @@ A small dashboard for a Kubernetes namespace, with two tabs:
   state and failure reason (`CrashLoopBackOff`, `ImagePullBackOff`, exit
   codes, etc.), recent Kubernetes Events, and a log viewer (container
   picker, tail length, previous-container logs for ones that crashed).
-- **Create Deployment** — a form to create a new `Deployment` in that
-  namespace: pick a container image from a Postgres-backed catalog, set
-  replicas, CPU/memory requests+limits, and an optional accelerator
-  type+count.
+- **Launch** — creates a `Deployment` (and, if a container port is given, a
+  matching `LoadBalancer` Service, since there's no ingress) in that
+  namespace. Either pick a template — **Ollama, vLLM, SGLang** (Intelligence
+  Layer) or **JupyterLab, RStudio** (Interface Layer) — which pre-fills a
+  known image, port, resource sizing, GPU defaults, and any required env
+  vars/args, or start from **Custom** and pick any image from the
+  Postgres-backed catalog. Every pre-filled field stays editable.
 
 - **Backend**: Rust, [Axum](https://github.com/tokio-rs/axum) +
   [kube-rs](https://kube.rs) + [sqlx](https://github.com/launchbadge/sqlx)
@@ -26,13 +34,16 @@ A small dashboard for a Kubernetes namespace, with two tabs:
 ## Layout
 
 ```
-common/             Shared types (PodInfo, PodEvent, ImageEntry, CreateDeploymentRequest, ...)
-backend/            Axum server, kube-rs watcher, sqlx/Postgres image catalog
-backend/migrations/ sqlx migrations, auto-run on startup
-frontend/           Leptos WASM app (built with Trunk), one component per tab
-k8s/                Kubernetes manifests to deploy the dashboard itself
-Dockerfile          Multi-stage build: compiles both crates, ships a distroless image
-.forgejo/           Forgejo Actions workflow that builds and pushes the image
+common/                    Shared types (PodInfo, PodEvent, ImageEntry, CreateDeploymentRequest, ...)
+backend/                   Axum server, kube-rs watcher, sqlx/Postgres image catalog
+backend/migrations/        sqlx migrations, auto-run on startup
+frontend/src/pods_tab.rs   Pods tab + detail panel
+frontend/src/create_deployment_tab.rs   Launch tab (templates + custom form)
+frontend/src/templates.rs  Hardcoded workload templates (Ollama/vLLM/SGLang/JupyterLab/RStudio)
+k8s/                       Kubernetes manifests to deploy the dashboard itself
+Dockerfile                 Multi-stage build: compiles both crates, ships a distroless image
+.forgejo/                  Forgejo Actions workflow that builds and pushes the image
+SPEC.md                    The broader platform vision this app is a slice of
 ```
 
 ## Running locally
@@ -82,7 +93,7 @@ All flags can also be set as environment variables:
 - `GET /api/pods` — JSON snapshot of the current pods in the watched namespace
 - `GET /ws` — WebSocket; sends a full snapshot on connect, then `upsert`/`delete` events as pods change
 - `GET /api/images` — JSON list of catalog entries from the `images` table (id, name, image, description)
-- `POST /api/deployments` — creates a `Deployment` in the watched namespace; body is `{name, image, replicas, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count}` (all the resource fields and `accelerator_type`/`accelerator_count` are optional/nullable)
+- `POST /api/deployments` — creates a `Deployment` in the watched namespace, and if `container_port` is set, also a `LoadBalancer` Service exposing it (no ingress controller in the cluster, so this is how a launched app becomes reachable). Body: `{name, image, replicas, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, container_port, env, args}` — everything except `name`/`image`/`replicas` is optional; `env` is `[[key, value], ...]` pairs (entries with an empty value are dropped, so an image's own default behavior — e.g. an auto-generated password logged at startup — still applies unless you set one); `args` is a list of container command-line arguments. Response adds `service_name`/`container_port` (both `null` if no port was given).
 - `GET /api/pods/{name}/logs?container=&tail_lines=&previous=` — plain-text container logs (`container` defaults to the pod's only container if it has one; `tail_lines` defaults to 500; `previous=true` gets the last terminated instance's logs, for a crashed container)
 - `GET /api/pods/{name}/events` — JSON list of Kubernetes Events involving that pod (`type_`, `reason`, `message`, `count`, `last_seen`), most recent first — note the apiserver's default Event TTL is short (commonly ~1h), so older pods often have none left
 - `GET /*` — serves the built frontend (`index.html`, JS, WASM, CSS)
@@ -90,8 +101,8 @@ All flags can also be set as environment variables:
 ## Image catalog (Postgres)
 
 The `images` table (schema in `backend/migrations/0001_create_images.sql`,
-applied automatically on startup via `sqlx::migrate!`) backs the dropdown on
-the Create Deployment tab:
+applied automatically on startup via `sqlx::migrate!`) backs the image
+catalog used by "Custom" mode on the Launch tab:
 
 ```sql
 CREATE TABLE images (
@@ -176,8 +187,9 @@ watched namespace = deployed namespace). They're pinned to `amd64` nodes via
    - `ServiceAccount` + `Role`/`RoleBinding` (`aether`) — scoped to the
      `ollama` namespace only, no cluster-wide permissions: `get`/`list`/`watch`
      on `pods` plus `get` on `pods/log` and `get`/`list` on `events` (Pods tab
-     and its detail panel), and `create`/`get` on `apps/deployments` (Create
-     Deployment tab).
+     and its detail panel), and `create`/`get` on `apps/deployments` and on
+     `services` (Launch tab — the Service is how a launched app becomes
+     reachable, since there's no ingress controller).
    - `Deployment` (`aether`) — 1 replica, resource requests/limits set, health
      probes on `/api/pods`, hardened `securityContext` (non-root, read-only
      root filesystem, all capabilities dropped).
@@ -207,12 +219,20 @@ To watch a namespace other than `ollama`, either:
 
 - RBAC is intentionally minimal and namespaced (no `ClusterRole`): read-only
   (`get`/`list`/`watch`) on `pods`, `get` on the `pods/log` subresource,
-  `get`/`list` on `events`, plus `create`/`get` on `apps/deployments` —
-  nothing else. The app can create Deployments but can't delete, patch, list,
-  or watch existing ones, and has no access to Secrets, ConfigMaps, RBAC
-  objects, etc. Pod logs can contain sensitive application output; anyone who
-  can reach this dashboard can read the logs of anything running in the
-  watched namespace.
+  `get`/`list` on `events`, plus `create`/`get` on `apps/deployments` and on
+  `services` — nothing else. The app can create Deployments and Services but
+  can't delete, patch, list, or watch existing ones, and has no access to
+  Secrets, ConfigMaps, RBAC objects, etc. Pod logs can contain sensitive
+  application output; anyone who can reach this dashboard can read the logs
+  of anything running in the watched namespace, and can launch a Service
+  with a public-facing LoadBalancer IP — there's no admission control over
+  what gets exposed.
+- Templates (Ollama/vLLM/SGLang/JupyterLab/RStudio) are unauthenticated by
+  default: Ollama has no auth at all, and JupyterLab/RStudio only get a
+  token/password if you set one in the form (otherwise they generate a
+  random one, visible only in the pod's logs — still no network-level
+  restriction on who can attempt to reach the login page once the Service
+  gets an external IP).
 - The Create Deployment form does not sanitize CPU/memory quantity strings
   beyond checking they're non-empty — malformed values are rejected by the
   Kubernetes API server itself (returned to the UI as an error), not
@@ -226,10 +246,29 @@ To watch a namespace other than `ollama`, either:
 ## Status & known limitations
 
 Everything above is implemented and has been exercised against the real
-cluster (not just locally built), including the failure-diagnosis path
-against a pod that had genuinely been `Failed` for two weeks. Known gaps,
-in case they matter for what you do next:
+cluster (not just locally built) — including the failure-diagnosis path
+against a pod that had genuinely been `Failed` for two weeks, and the
+Launch tab's port/env/args/Service wiring verified with real throwaway
+Deployments (one confirmed via its own container logs: args were passed
+through to the container and it ran and printed them). Known gaps, in case
+they matter for what you do next:
 
+- **This is a scoped-down slice of `SPEC.md`, not the whole thing.** No
+  ingress controller and no StorageClass exist in this cluster yet, so
+  there's no Gateway layer and no persistent storage — launched apps
+  (including the LLM engines) lose all state on pod restart. `SPEC.md`'s
+  multi-tenancy, HPA, and ArgoCD/GitOps roadmap items are entirely
+  unaddressed; this only covers "deploy a single-namespace workload from a
+  template."
+- **Templates are hardcoded** in `frontend/src/templates.rs`, not
+  admin-editable or DB-backed like the image catalog. Adding a new
+  template means a code change + rebuild.
+- **vLLM/SGLang templates haven't been launched for real** — verified via
+  a lightweight substitute (nginx/busybox) exercising the same code path
+  (port/env/args/Service), not by actually pulling and running the
+  multi-GB vLLM/SGLang images, which would have been slow in this
+  environment. Expect to iterate on their default resource sizing once you
+  actually run one.
 - **Not yet deployed for real.** `k8s/` has only ever been validated with
   `--dry-run=server`; nobody has run `kubectl apply -k k8s/` for real. You
   still need to create the `regcred` and `aether-db` secrets in-cluster and
@@ -243,8 +282,8 @@ in case they matter for what you do next:
 - **Single namespace only**, fixed at deploy time via the pod's own
   namespace. No in-app namespace switcher; watching multiple namespaces
   means deploying multiple copies (see "Watching a different namespace").
-- **No way to scale, delete, or edit a Deployment from the UI** — only
-  create. Same for pods: no delete/restart action, view-only plus logs.
+- **No way to scale, delete, or edit a Deployment/Service from the UI** —
+  only create. Same for pods: no delete/restart action, view-only plus logs.
 - **Dashboard is dark-mode only**, no light theme or user preference toggle.
   Colors are pulled from the project's validated dark dashboard palette
   (status/accent/surface tokens) rather than picked ad hoc — keep new UI

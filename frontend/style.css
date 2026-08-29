@@ -313,6 +313,29 @@ tbody tr:hover {
 
 /* Create Deployment form */
 
+.template-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.template-picker .tab-button {
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.template-notes {
+  max-width: 640px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid var(--accent);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  font-size: 13px;
+  margin-bottom: var(--space-4);
+}
+
 .deploy-form {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -347,6 +370,21 @@ tbody tr:hover {
   margin: 0;
 }
 
+.deploy-form fieldset.env-fieldset {
+  flex-direction: column;
+  flex-wrap: nowrap;
+}
+
+.env-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.env-row label {
+  flex: 1 1 160px;
+}
+
 .deploy-form fieldset label {
   flex: 1 1 160px;
 }
@@ -360,23 +398,33 @@ tbody tr:hover {
 }
 
 .deploy-form input,
-.deploy-form select {
+.deploy-form select,
+.deploy-form textarea {
   background: var(--page);
   border: 1px solid var(--border-strong);
   color: var(--text-primary);
   border-radius: var(--radius-sm);
   padding: 9px 11px;
   font-size: 14px;
+  font-family: inherit;
   transition: border-color 150ms ease;
 }
 
+.deploy-form textarea {
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+
 .deploy-form input:hover,
-.deploy-form select:hover {
+.deploy-form select:hover,
+.deploy-form textarea:hover {
   border-color: var(--text-muted);
 }
 
 .deploy-form input:focus-visible,
-.deploy-form select:focus-visible {
+.deploy-form select:focus-visible,
+.deploy-form textarea:focus-visible {
   border-color: var(--accent);
 }
 
