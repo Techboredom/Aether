@@ -35,18 +35,6 @@ impl AppState {
         self.pods.read().await.values().cloned().collect()
     }
 
-    /// Finds a currently-`Running` pod backing `deployment_name`, for the
-    /// reverse proxy to portforward to. Reuses the watcher's already-live
-    /// cache instead of a fresh k8s API list per proxied request.
-    pub async fn running_pod_for_deployment(&self, deployment_name: &str) -> Option<String> {
-        self.pods
-            .read()
-            .await
-            .values()
-            .find(|p| p.deployment_name.as_deref() == Some(deployment_name) && p.phase == "Running")
-            .map(|p| p.name.clone())
-    }
-
     /// Inserts or replaces a pod's info and broadcasts the change to any live listeners.
     pub async fn upsert(&self, pod: PodInfo) {
         self.pods.write().await.insert(pod.name.clone(), pod.clone());

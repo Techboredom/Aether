@@ -158,11 +158,11 @@ pub async fn create_deployment(
 
     // No ingress controller in the cluster yet, so expose the app directly via
     // its own LoadBalancer Service (MetalLB assigns it an external IP) —
-    // unless it's proxy-enabled, in which case Aether's own /proxy/ route is
-    // the only way in and no Service is needed at all (portforward reaches
-    // the pod directly through the API server connection).
+    // created regardless of `enable_proxy`, since Aether's own /proxy/ route
+    // (backend/src/proxy.rs) reaches proxy-enabled deployments through this
+    // same Service's in-cluster ClusterIP, not around it.
     let mut service_name = None;
-    if let (Some(port), false) = (req.container_port, req.enable_proxy) {
+    if let Some(port) = req.container_port {
         let service = Service {
             metadata: ObjectMeta {
                 name: Some(name.clone()),
