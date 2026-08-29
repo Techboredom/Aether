@@ -3,8 +3,10 @@ use k8s_openapi::api::core::v1::Pod;
 use kube::api::{Api, LogParams};
 use serde::Deserialize;
 
+use crate::auth::CurrentUser;
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::validate;
 
 #[derive(Deserialize)]
 pub struct LogsQuery {
@@ -17,10 +19,12 @@ pub struct LogsQuery {
 }
 
 pub async fn get_pod_logs(
+    _user: CurrentUser,
     State(state): State<AppState>,
     Path(name): Path<String>,
     Query(query): Query<LogsQuery>,
 ) -> Result<String, ApiError> {
+    validate::k8s_name("name", &name)?;
     let api: Api<Pod> = Api::namespaced(state.client.clone(), &state.namespace);
     let params = LogParams {
         container: query.container,

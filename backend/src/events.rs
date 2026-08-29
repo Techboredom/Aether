@@ -4,13 +4,17 @@ use common::PodEventInfo;
 use k8s_openapi::api::core::v1::Event;
 use kube::api::{Api, ListParams};
 
+use crate::auth::CurrentUser;
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::validate;
 
 pub async fn get_pod_events(
+    _user: CurrentUser,
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<Vec<PodEventInfo>>, ApiError> {
+    validate::k8s_name("name", &name)?;
     let api: Api<Event> = Api::namespaced(state.client.clone(), &state.namespace);
     let selector = format!("involvedObject.kind=Pod,involvedObject.name={name},involvedObject.namespace={}", state.namespace);
     let events = api.list(&ListParams::default().fields(&selector)).await?;

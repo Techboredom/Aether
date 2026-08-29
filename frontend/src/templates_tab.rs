@@ -202,6 +202,7 @@ pub fn TemplatesTab() -> impl IntoView {
                     <input
                         type="text"
                         required=true
+                        maxlength="100"
                         prop:value=move || name.get()
                         on:input=move |ev| name.set(event_target_value(&ev))
                     />
@@ -212,6 +213,7 @@ pub fn TemplatesTab() -> impl IntoView {
                     <input
                         type="text"
                         required=true
+                        maxlength="512"
                         placeholder="e.g. ollama/ollama:latest"
                         prop:value=move || image.get()
                         on:input=move |ev| image.set(event_target_value(&ev))
@@ -223,6 +225,7 @@ pub fn TemplatesTab() -> impl IntoView {
                     <input
                         type="number"
                         min="1"
+                        max="65535"
                         step="1"
                         prop:value=move || container_port.get()
                         on:input=move |ev| container_port.set(event_target_value(&ev))
@@ -319,6 +322,7 @@ pub fn TemplatesTab() -> impl IntoView {
                     "Notes (shown when this template is selected on the Launch tab)"
                     <textarea
                         rows="2"
+                        maxlength="2000"
                         prop:value=move || notes_text.get()
                         on:input=move |ev| notes_text.set(event_target_value(&ev))
                     ></textarea>

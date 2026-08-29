@@ -1,11 +1,15 @@
 # Aether
 
-A dashboard for a Kubernetes namespace, with three tabs. It's the
-web-interface slice of the broader platform described in `SPEC.md` — the
-Intelligence Layer (LLM engines) and Interface Layer (IDEs) as launchable
-workloads — scoped down to what's actually buildable today: this cluster has
-no ingress controller or StorageClass yet, so there's no Gateway layer or
-persistent storage (see "Status & known limitations" below).
+A dashboard for a Kubernetes namespace, behind a login, with up to four tabs
+depending on your role. It's the web-interface slice of the broader platform
+described in `SPEC.md` — the Intelligence Layer (LLM engines) and Interface
+Layer (IDEs) as launchable workloads — scoped down to what's actually
+buildable today: this cluster has no ingress controller or StorageClass yet,
+so there's no Gateway layer or persistent storage (see "Status & known
+limitations" below).
+
+There are two account roles: **admin** and **user**. Both can use Pods and
+Launch; only admins see Templates and Users.
 
 - **Pods** — shows the running pods live, with their basic resource info:
   CPU/memory requests and limits, accelerators (GPUs, etc.), status, node,
@@ -21,16 +25,19 @@ persistent storage (see "Status & known limitations" below).
   defaults, and any default env vars/args for that template. Every
   pre-filled field stays editable, and Custom picks any image from the
   Postgres-backed image catalog instead.
-- **Templates** — basic admin CRUD for the templates the Launch tab offers:
-  a table of existing templates (edit/delete) and a form to add a new one
-  (same fields as a template pre-fills into Launch, plus notes shown when
-  it's selected there).
+- **Templates** *(admin only)* — CRUD for the templates the Launch tab
+  offers: a table of existing templates (edit/delete) and a form to add a
+  new one (same fields as a template pre-fills into Launch, plus notes shown
+  when it's selected there).
+- **Users** *(admin only)* — create accounts (username, password, role) and
+  delete them. No self-service signup, no password reset flow — an admin
+  does both.
 
 - **Backend**: Rust, [Axum](https://github.com/tokio-rs/axum) +
   [kube-rs](https://kube.rs) + [sqlx](https://github.com/launchbadge/sqlx)
   (Postgres). Watches one namespace via the Kubernetes watch API and serves a
   REST snapshot plus a WebSocket that pushes live pod updates; also serves the
-  image catalog, the template catalog, and creates Deployments on request.
+  image/template catalogs, authentication, and creates Deployments on request.
 - **Frontend**: Rust, [Leptos](https://leptos.dev) (client-side, compiled to
   WASM with [Trunk](https://trunkrs.dev)). Loads the initial pod snapshot over
   REST, then stays in sync over the WebSocket.
@@ -39,12 +46,17 @@ persistent storage (see "Status & known limitations" below).
 ## Layout
 
 ```
-common/                    Shared types (PodInfo, PodEvent, ImageEntry, TemplateEntry, CreateDeploymentRequest, ...)
-backend/                   Axum server, kube-rs watcher, sqlx/Postgres image + template catalogs
+common/                    Shared types (PodInfo, TemplateEntry, UserInfo, CreateDeploymentRequest, ...)
+backend/                   Axum server, kube-rs watcher, sqlx/Postgres catalogs + auth
 backend/migrations/        sqlx migrations, auto-run on startup
+backend/src/auth.rs        Password hashing, session cookie, CurrentUser/AdminUser extractors, login/logout/me
+backend/src/users.rs       Users admin CRUD (admin-only)
+backend/src/validate.rs    Input validation (k8s names, ports, quantities, env keys, ...)
+frontend/src/login.rs      Login page
 frontend/src/pods_tab.rs   Pods tab + detail panel
 frontend/src/create_deployment_tab.rs   Launch tab (template dropdown + form)
 frontend/src/templates_tab.rs   Templates admin tab (CRUD)
+frontend/src/users_tab.rs       Users admin tab (CRUD)
 frontend/src/env_editor.rs      Shared add/remove env-var-row widget (Launch + Templates)
 k8s/                       Kubernetes manifests to deploy the dashboard itself
 Dockerfile                 Multi-stage build: compiles both crates, ships a distroless image
@@ -61,9 +73,9 @@ rustup target add wasm32-unknown-unknown
 cargo install trunk
 ```
 
-You'll also need a Postgres instance for the image catalog. For local dev,
-any throwaway instance works — the backend creates the `images` table itself
-on startup:
+You'll also need a Postgres instance for the image/template catalogs and
+accounts. For local dev, any throwaway instance works — the backend creates
+its tables itself on startup:
 
 ```
 docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:16-alpine
@@ -76,12 +88,19 @@ cd frontend && trunk build --release && cd ..
 cd backend
 NAMESPACE=<namespace-to-watch> \
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres \
+ADMIN_BOOTSTRAP_PASSWORD=<pick-something> \
 cargo run --release -- --static-dir ../frontend/dist
 ```
 
-Open `http://localhost:3000`. Auth to the cluster auto-detects: in-cluster
-service account first, falling back to your local kubeconfig (`~/.kube/config`,
-current context) — the same as `kubectl`.
+`ADMIN_BOOTSTRAP_PASSWORD` only matters the *first* time — it creates a
+username `admin` account if (and only if) the `users` table is empty. Without
+it on a fresh database, the app starts fine but nobody can log in (the
+backend logs a warning saying so). It's ignored on every later run once a
+user exists.
+
+Open `http://localhost:3000`, log in as `admin`. Auth to the cluster
+auto-detects: in-cluster service account first, falling back to your local
+kubeconfig (`~/.kube/config`, current context) — the same as `kubectl`.
 
 ### Backend configuration
 
@@ -92,16 +111,27 @@ All flags can also be set as environment variables:
 | `--namespace` / `NAMESPACE` | *(required)* | Namespace to watch and to create Deployments in |
 | `--bind-addr` / `BIND_ADDR` | `0.0.0.0:3000` | Address the HTTP server binds to |
 | `--static-dir` / `STATIC_DIR` | `frontend/dist` | Directory of the built frontend to serve |
-| `--database-url` / `DATABASE_URL` | *(required)* | Postgres connection string for the image and template catalogs |
+| `--database-url` / `DATABASE_URL` | *(required)* | Postgres connection string for the image/template catalogs and accounts |
+| `--admin-bootstrap-password` / `ADMIN_BOOTSTRAP_PASSWORD` | *(none)* | Creates the initial `admin` account on first run only; ignored once any user exists |
 
 ### Endpoints
 
+All endpoints below except `POST /api/login` and static assets require a
+valid session cookie (401 if missing/expired); the ones marked *(admin)*
+additionally require the `admin` role (403 otherwise).
+
+- `POST /api/login` — body `{username, password}`; sets the `aether_session` cookie and returns the logged-in `UserInfo` on success, 401 on bad credentials
+- `POST /api/logout` — clears the session (both server-side and the cookie)
+- `GET /api/me` — returns the current `UserInfo` (`{id, username, role}`), or 401 if not logged in — this is what the frontend polls on load to decide whether to show the login page
+- `GET /api/users` *(admin)* — list accounts (id, username, role — never password hashes)
+- `POST /api/users` *(admin)* — create an account; body `{username, password, role}` (`role` is `"admin"` or `"user"`); username 3-32 chars, password ≥ 8 chars
+- `DELETE /api/users/{id}` *(admin)* — delete an account; an admin can't delete their own account (guards against an easy self-lockout)
 - `GET /api/pods` — JSON snapshot of the current pods in the watched namespace
 - `GET /ws` — WebSocket; sends a full snapshot on connect, then `upsert`/`delete` events as pods change
 - `GET /api/images` — JSON list of catalog entries from the `images` table (id, name, image, description)
-- `GET /api/templates` — JSON list of templates (see "Templates catalog" below)
-- `POST /api/templates` / `PUT /api/templates/{id}` — create/update a template (Templates admin tab). Body is a `TemplateEntry` minus `id`: `{name, image, container_port, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, env, args, notes}` — only `name`/`image` are required, everything else defaults to empty/`null`.
-- `DELETE /api/templates/{id}` — delete a template
+- `GET /api/templates` — JSON list of templates (any logged-in role — needed for the Launch tab's dropdown)
+- `POST /api/templates` / `PUT /api/templates/{id}` *(admin)* — create/update a template. Body is a `TemplateEntry` minus `id`: `{name, image, container_port, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, env, args, notes}` — only `name`/`image` are required, everything else defaults to empty/`null`.
+- `DELETE /api/templates/{id}` *(admin)* — delete a template
 - `POST /api/deployments` — creates a `Deployment` in the watched namespace, and if `container_port` is set, also a `LoadBalancer` Service exposing it (no ingress controller in the cluster, so this is how a launched app becomes reachable). Body: `{name, image, replicas, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, container_port, env, args}` — everything except `name`/`image`/`replicas` is optional; `env` is `[[key, value], ...]` pairs (entries with an empty value are dropped, so an image's own default behavior — e.g. an auto-generated password logged at startup — still applies unless you set one); `args` is a list of container command-line arguments. Response adds `service_name`/`container_port` (both `null` if no port was given).
 - `GET /api/pods/{name}/logs?container=&tail_lines=&previous=` — plain-text container logs (`container` defaults to the pod's only container if it has one; `tail_lines` defaults to 500; `previous=true` gets the last terminated instance's logs, for a crashed container)
 - `GET /api/pods/{name}/events` — JSON list of Kubernetes Events involving that pod (`type_`, `reason`, `message`, `count`, `last_seen`), most recent first — note the apiserver's default Event TTL is short (commonly ~1h), so older pods often have none left
@@ -253,35 +283,74 @@ To watch a namespace other than `ollama`, either:
 
 ## Security notes
 
-- RBAC is intentionally minimal and namespaced (no `ClusterRole`): read-only
-  (`get`/`list`/`watch`) on `pods`, `get` on the `pods/log` subresource,
-  `get`/`list` on `events`, plus `create`/`get` on `apps/deployments` and on
-  `services` — nothing else. The app can create Deployments and Services but
-  can't delete, patch, list, or watch existing ones, and has no access to
-  Secrets, ConfigMaps, RBAC objects, etc. Pod logs can contain sensitive
-  application output; anyone who can reach this dashboard can read the logs
-  of anything running in the watched namespace, and can launch a Service
-  with a public-facing LoadBalancer IP — there's no admission control over
-  what gets exposed.
-- Templates (Ollama/vLLM/SGLang/JupyterLab/RStudio) are unauthenticated by
-  default: Ollama has no auth at all, and JupyterLab/RStudio only get a
-  token/password if you set one in the form (otherwise they generate a
-  random one, visible only in the pod's logs — still no network-level
-  restriction on who can attempt to reach the login page once the Service
-  gets an external IP).
-- The Launch and Templates forms don't sanitize CPU/memory quantity strings
-  beyond checking they're non-empty — malformed values are rejected by the
-  Kubernetes API server itself (returned to the UI as an error), not
-  pre-validated client- or server-side.
-- The Templates admin tab has no access control of its own — anyone who can
-  reach the dashboard can create, edit, or delete templates, including their
-  command-line `args` (which get passed straight to the container on
-  launch). There's no separate "admin" role; this app has one trust level.
+**Authentication:**
+
+- Passwords are hashed with argon2 (via the `argon2`/`password-hash` crates),
+  never stored or logged in plaintext.
+- Sessions are opaque random tokens (48 alphanumeric chars from the OS RNG)
+  stored server-side in the `sessions` table, sent to the browser as an
+  `HttpOnly`, `SameSite=Lax` cookie (`aether_session`) so client-side JS
+  (including any XSS) can't read it, and cross-site requests can't ride on
+  it. Sessions last 7 days and aren't refreshed on activity; logging out
+  deletes the row server-side, not just the cookie.
+- The cookie is **not** marked `Secure` — this cluster has no TLS anywhere
+  (see "Status & known limitations"), and a `Secure` cookie would simply
+  never be sent over the plain-HTTP LoadBalancer this app is reached
+  through. In this network, the session token (and the login password on
+  the wire) are only as protected as the network itself.
+- There's no rate limiting on `POST /api/login` — nothing stops password
+  guessing beyond whatever's normal for your account's password strength
+  (enforced at creation: ≥ 8 characters, nothing more).
+- The app-level `admin`/`user` roles gate *application* actions (Templates,
+  Users, Launch) and are unrelated to Kubernetes RBAC below, which gates
+  what the backend's own ServiceAccount can do to the cluster regardless of
+  which human is logged in.
+
+**Input validation** (`backend/src/validate.rs`), applied to Launch, Templates,
+and Users requests server-side (the real boundary) and mirrored as HTML5
+attributes client-side for early feedback:
+
+- Deployment/Service names must be valid Kubernetes DNS-1123 labels
+  (lowercase alphanumeric + `-`, 1-63 chars) — also closes off any
+  path-injection risk from a crafted pod name reaching the Kubernetes API
+  through `/api/pods/{name}/logs` or `/events`.
+- Container ports must be 1-65535; CPU/memory quantities get a light format
+  check (still not full k8s `Quantity` grammar — malformed-but-plausible
+  values are caught by the Kubernetes API server itself); env var keys must
+  look like real identifiers; env values, args, template names, and image
+  refs are all length-capped.
+- None of this defends against a *logged-in* user launching something
+  legitimately dangerous (arbitrary image, arbitrary args) — that's a
+  trust decision inherent to what this app does, not something input
+  validation can fix. It only rejects malformed/oversized/injection-shaped
+  input.
+
+**Kubernetes RBAC** is minimal and namespaced (no `ClusterRole`): read-only
+(`get`/`list`/`watch`) on `pods`, `get` on `pods/log`, `get`/`list` on
+`events`, plus `create`/`get` on `apps/deployments` and on `services` —
+nothing else. The app can create Deployments and Services but can't delete,
+patch, list, or watch existing ones, and has no access to Secrets,
+ConfigMaps, RBAC objects, etc.
+
+**Other:**
+
+- Pod logs can contain sensitive application output; any logged-in user
+  (either role) can read the logs of anything running in the watched
+  namespace, and (via Launch) can create a Service with a public-facing
+  LoadBalancer IP — there's no admission control over what gets exposed.
+- Templates (Ollama/vLLM/SGLang/JupyterLab/RStudio) are unauthenticated *at
+  the app they launch* by default: Ollama has no auth at all, and
+  JupyterLab/RStudio only get a token/password if you set one in the form
+  (otherwise they generate a random one, visible only in the pod's logs).
+  This is unrelated to logging into Aether itself.
 - The container runs as a non-root user with a read-only root filesystem and
   all Linux capabilities dropped.
 - `CorsLayer::permissive()` is enabled on the backend to make local `trunk
-  serve` dev proxying easy. It's harmless behind the cluster's internal
-  network, but tighten it if this is ever exposed beyond localhost/your LAN.
+  serve` dev proxying easy. It sets `Access-Control-Allow-Origin: *` without
+  `Access-Control-Allow-Credentials`, which per the Fetch spec means
+  browsers won't expose credentialed cross-origin responses to another
+  site's JS — CSRF protection here actually comes from the cookie's
+  `SameSite=Lax`, not from this CORS policy.
 
 ## Status & known limitations
 
@@ -290,10 +359,28 @@ cluster (not just locally built) — including the failure-diagnosis path
 against a pod that had genuinely been `Failed` for two weeks, the Launch
 tab's port/env/args/Service wiring verified with real throwaway Deployments
 (one confirmed via its own container logs: args were passed through to the
-container and it ran and printed them), and full template CRUD (create,
-edit, delete, and launching from a DB-backed template) exercised against a
-throwaway Postgres. Known gaps, in case they matter for what you do next:
+container and it ran and printed them), full template CRUD (create, edit,
+delete, and launching from a DB-backed template) exercised against a
+throwaway Postgres, and the full auth flow: bootstrap admin creation,
+login/logout, a real `user`-role account confirmed able to reach Pods/Launch
+but getting 403s from the Templates/Users write endpoints, and each
+validation rule in `backend/src/validate.rs` confirmed to actually reject
+its bad input (bad k8s name, out-of-range port, malformed quantity, bad env
+key, path-injection-shaped pod name, weak password) via curl. Known gaps, in
+case they matter for what you do next:
 
+- **No password reset or self-service anything.** An admin creates every
+  account (Users tab) with the password they'll use; there's no "forgot
+  password" or user-initiated password change. To rotate a compromised
+  password today, delete and recreate the account.
+- **No login rate limiting.** `POST /api/login` has no lockout/backoff, so
+  nothing but password strength (≥ 8 chars, enforced at creation) stands
+  between an attacker and password guessing.
+- **Sessions aren't revoked on role/password change.** Deleting a user's
+  session rows (or the user itself, which cascades) is the only way to
+  force a re-login; changing a password isn't even possible yet (see above)
+  without deleting and recreating the account, which does invalidate old
+  sessions via the `ON DELETE CASCADE` on `sessions.user_id`.
 - **This is a scoped-down slice of `SPEC.md`, not the whole thing.** No
   ingress controller and no StorageClass exist in this cluster yet, so
   there's no Gateway layer and no persistent storage — launched apps

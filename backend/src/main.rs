@@ -1,3 +1,4 @@
+mod auth;
 mod deployments;
 mod error;
 mod events;
@@ -6,6 +7,8 @@ mod logs;
 mod resources;
 mod state;
 mod templates;
+mod users;
+mod validate;
 mod watch;
 mod ws;
 
@@ -42,6 +45,11 @@ struct Args {
     /// Postgres connection string backing the container image catalog.
     #[arg(long, env = "DATABASE_URL")]
     database_url: String,
+
+    /// Password for a one-time bootstrap "admin" account, created only if the
+    /// `users` table is empty. Ignored once any user exists.
+    #[arg(long, env = "ADMIN_BOOTSTRAP_PASSWORD")]
+    admin_bootstrap_password: Option<String>,
 }
 
 #[tokio::main]
@@ -57,6 +65,7 @@ async fn main() -> anyhow::Result<()> {
 
     let pg = PgPoolOptions::new().max_connections(5).connect(&args.database_url).await?;
     sqlx::migrate!().run(&pg).await?;
+    bootstrap_admin(&pg, args.admin_bootstrap_password.as_deref()).await?;
 
     let state = AppState::new(args.namespace.clone(), client.clone(), pg);
     tokio::spawn(watch::run(state.clone(), client));
@@ -65,6 +74,11 @@ async fn main() -> anyhow::Result<()> {
     let static_service = ServeDir::new(&args.static_dir).fallback(ServeFile::new(&index_html));
 
     let app = Router::new()
+        .route("/api/login", post(auth::login))
+        .route("/api/logout", post(auth::logout))
+        .route("/api/me", get(auth::me))
+        .route("/api/users", get(users::list_users).post(users::create_user))
+        .route("/api/users/{id}", axum::routing::delete(users::delete_user))
         .route("/api/pods", get(ws::list_pods))
         .route("/api/images", get(images::list_images))
         .route("/api/templates", get(templates::list_templates).post(templates::create_template))
@@ -83,5 +97,27 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
 
+    Ok(())
+}
+
+/// Creates the initial "admin" account if (and only if) no users exist yet.
+/// Without this there'd be no way to log in at all on a fresh database.
+async fn bootstrap_admin(pg: &sqlx::PgPool, bootstrap_password: Option<&str>) -> anyhow::Result<()> {
+    let user_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users").fetch_one(pg).await?;
+    if user_count > 0 {
+        return Ok(());
+    }
+    let Some(password) = bootstrap_password else {
+        tracing::warn!(
+            "no users exist yet and ADMIN_BOOTSTRAP_PASSWORD is not set — the app has no way to log in until a user is created"
+        );
+        return Ok(());
+    };
+    let password_hash = auth::hash_password(password).map_err(|_| anyhow::anyhow!("failed to hash bootstrap password"))?;
+    sqlx::query("INSERT INTO users (username, password_hash, role) VALUES ('admin', $1, 'admin')")
+        .bind(&password_hash)
+        .execute(pg)
+        .await?;
+    tracing::info!("created initial admin account (username: admin)");
     Ok(())
 }

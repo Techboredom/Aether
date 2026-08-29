@@ -148,3 +148,34 @@ pub struct SaveTemplateRequest {
     pub args: Vec<String>,
     pub notes: String,
 }
+
+/// The two account classes. Admins can manage templates and accounts; both
+/// classes can view pods and launch deployments.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    Admin,
+    User,
+}
+
+/// The logged-in user, as returned by `GET /api/me`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UserInfo {
+    pub id: i32,
+    pub username: String,
+    pub role: Role,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LoginRequest {
+    pub username: String,
+    pub password: String,
+}
+
+/// Submitted by the Users admin tab to create an account.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreateUserRequest {
+    pub username: String,
+    pub password: String,
+    pub role: Role,
+}

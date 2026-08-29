@@ -3,6 +3,7 @@ use axum::Json;
 use common::ImageEntry;
 use sqlx::FromRow;
 
+use crate::auth::CurrentUser;
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -25,7 +26,7 @@ impl From<ImageRow> for ImageEntry {
     }
 }
 
-pub async fn list_images(State(state): State<AppState>) -> Result<Json<Vec<ImageEntry>>, ApiError> {
+pub async fn list_images(_user: CurrentUser, State(state): State<AppState>) -> Result<Json<Vec<ImageEntry>>, ApiError> {
     let rows: Vec<ImageRow> = sqlx::query_as("SELECT id, name, image, description FROM images ORDER BY name")
         .fetch_all(&state.pg)
         .await?;

@@ -12,22 +12,41 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{Api, PostParams};
 
+use crate::auth::CurrentUser;
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::validate;
 
 pub async fn create_deployment(
+    _user: CurrentUser,
     State(state): State<AppState>,
     Json(req): Json<CreateDeploymentRequest>,
 ) -> Result<Json<CreateDeploymentResponse>, ApiError> {
-    if req.name.trim().is_empty() {
-        return Err(ApiError::BadRequest("name is required".into()));
-    }
-    if req.image.trim().is_empty() {
-        return Err(ApiError::BadRequest("image is required".into()));
-    }
+    validate::k8s_name("name", &req.name)?;
+    validate::image_ref(&req.image)?;
     if req.replicas < 0 {
         return Err(ApiError::BadRequest("replicas must not be negative".into()));
     }
+    if let Some(port) = req.container_port {
+        validate::container_port(port)?;
+    }
+    for field in [
+        ("cpu_request", &req.cpu_request),
+        ("cpu_limit", &req.cpu_limit),
+        ("memory_request", &req.memory_request),
+        ("memory_limit", &req.memory_limit),
+    ] {
+        if let (name, Some(value)) = field {
+            validate::quantity(name, value)?;
+        }
+    }
+    for (key, _) in &req.env {
+        if !key.trim().is_empty() {
+            validate::env_key(key)?;
+        }
+    }
+    validate::bounded_list("env", &req.env.iter().map(|(_, v)| v.clone()).collect::<Vec<_>>(), 50, 4096)?;
+    validate::bounded_list("args", &req.args, 50, 1024)?;
 
     let mut requests = BTreeMap::new();
     let mut limits = BTreeMap::new();

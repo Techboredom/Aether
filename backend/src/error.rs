@@ -9,6 +9,8 @@ pub enum ApiError {
     Kube(kube::Error),
     Sqlx(sqlx::Error),
     BadRequest(String),
+    Unauthorized,
+    Forbidden(String),
 }
 
 impl From<kube::Error> for ApiError {
@@ -33,6 +35,8 @@ impl IntoResponse for ApiError {
             ApiError::Kube(err) => (StatusCode::BAD_GATEWAY, err.to_string()),
             ApiError::Sqlx(err) => (StatusCode::SERVICE_UNAVAILABLE, err.to_string()),
             ApiError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
+            ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "not logged in".to_string()),
+            ApiError::Forbidden(message) => (StatusCode::FORBIDDEN, message),
         };
         (status, Json(json!({ "error": message }))).into_response()
     }
