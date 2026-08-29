@@ -4,9 +4,12 @@ use axum::extract::State;
 use axum::Json;
 use common::{CreateDeploymentRequest, CreateDeploymentResponse};
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
-use k8s_openapi::api::core::v1::{Container, PodSpec, PodTemplateSpec, ResourceRequirements};
+use k8s_openapi::api::core::v1::{
+    Container, EnvVar, PodSpec, PodTemplateSpec, ResourceRequirements, Service, ServicePort, ServiceSpec,
+};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
+use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{Api, PostParams};
 
 use crate::error::ApiError;
@@ -48,6 +51,18 @@ pub async fn create_deployment(
             limits.insert(accel_type.clone(), qty);
         }
 
+    let env: Vec<EnvVar> = req
+        .env
+        .iter()
+        .filter(|(_, value)| !value.trim().is_empty())
+        .map(|(name, value)| EnvVar {
+            name: name.clone(),
+            value: Some(value.clone()),
+            ..Default::default()
+        })
+        .collect();
+    let args: Vec<String> = req.args.iter().map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect();
+
     let mut labels = BTreeMap::new();
     labels.insert("app".to_string(), req.name.clone());
 
@@ -66,7 +81,7 @@ pub async fn create_deployment(
             },
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
-                    labels: Some(labels),
+                    labels: Some(labels.clone()),
                     ..Default::default()
                 }),
                 spec: Some(PodSpec {
@@ -78,6 +93,8 @@ pub async fn create_deployment(
                             limits: (!limits.is_empty()).then_some(limits),
                             ..Default::default()
                         }),
+                        env: (!env.is_empty()).then_some(env),
+                        args: (!args.is_empty()).then_some(args),
                         ..Default::default()
                     }],
                     ..Default::default()
@@ -88,11 +105,42 @@ pub async fn create_deployment(
         status: None,
     };
 
-    let api: Api<Deployment> = Api::namespaced(state.client.clone(), &state.namespace);
-    let created = api.create(&PostParams::default(), &deployment).await?;
+    let deployments: Api<Deployment> = Api::namespaced(state.client.clone(), &state.namespace);
+    let created = deployments.create(&PostParams::default(), &deployment).await?;
+    let name = created.metadata.name.unwrap_or(req.name);
+
+    // No ingress controller in the cluster yet, so expose the app directly via
+    // its own LoadBalancer Service (MetalLB assigns it an external IP).
+    let mut service_name = None;
+    if let Some(port) = req.container_port {
+        let service = Service {
+            metadata: ObjectMeta {
+                name: Some(name.clone()),
+                namespace: Some(state.namespace.clone()),
+                labels: Some(labels.clone()),
+                ..Default::default()
+            },
+            spec: Some(ServiceSpec {
+                type_: Some("LoadBalancer".to_string()),
+                selector: Some(labels),
+                ports: Some(vec![ServicePort {
+                    port,
+                    target_port: Some(IntOrString::Int(port)),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            status: None,
+        };
+        let services: Api<Service> = Api::namespaced(state.client.clone(), &state.namespace);
+        let created_service = services.create(&PostParams::default(), &service).await?;
+        service_name = created_service.metadata.name;
+    }
 
     Ok(Json(CreateDeploymentResponse {
-        name: created.metadata.name.unwrap_or(req.name),
+        name,
         namespace: state.namespace,
+        service_name,
+        container_port: req.container_port,
     }))
 }

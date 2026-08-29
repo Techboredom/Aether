@@ -2,6 +2,7 @@ mod create_deployment_tab;
 mod format;
 mod pod_detail;
 mod pods_tab;
+mod templates;
 mod ws;
 
 use create_deployment_tab::CreateDeploymentTab;
@@ -40,7 +41,7 @@ fn App() -> impl IntoView {
                         class:active=move || tab.get() == Tab::CreateDeployment
                         on:click=move |_| tab.set(Tab::CreateDeployment)
                     >
-                        "Create Deployment"
+                        "Launch"
                     </button>
                 </nav>
             </header>

@@ -61,7 +61,7 @@ pub struct ImageEntry {
 }
 
 /// Submitted by the "create deployment" form.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CreateDeploymentRequest {
     pub name: String,
     pub image: String,
@@ -73,12 +73,27 @@ pub struct CreateDeploymentRequest {
     /// Accelerator resource name, e.g. "nvidia.com/gpu" or "amd.com/gpu".
     pub accelerator_type: Option<String>,
     pub accelerator_count: Option<i64>,
+    /// If set, a `Service` (type LoadBalancer) is also created exposing this
+    /// container port, since there's no ingress controller in the cluster yet.
+    #[serde(default)]
+    pub container_port: Option<i32>,
+    /// Extra environment variables. Entries with an empty value are dropped,
+    /// so an app's own default behavior (e.g. an auto-generated password
+    /// logged at startup) still applies unless a value is explicitly set.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+    /// Extra container command-line arguments (e.g. `--model=...` for vLLM/SGLang).
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreateDeploymentResponse {
     pub name: String,
     pub namespace: String,
+    /// Present if `container_port` was set and a matching Service was created.
+    pub service_name: Option<String>,
+    pub container_port: Option<i32>,
 }
 
 /// A Kubernetes Event involving a specific pod (scheduling failures, image pull

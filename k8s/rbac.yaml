@@ -21,6 +21,10 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["create", "get"]
+  # Launched apps get their own LoadBalancer Service (no ingress controller yet).
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create", "get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
