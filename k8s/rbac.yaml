@@ -14,11 +14,6 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
-  # Reverse proxy for proxy-enabled templates (backend/src/proxy.rs): tunnels
-  # to the pod directly, the same mechanism `kubectl port-forward` uses.
-  - apiGroups: [""]
-    resources: ["pods/portforward"]
-    verbs: ["create"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["get", "list"]
@@ -26,7 +21,9 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["create", "get"]
-  # Launched apps get their own LoadBalancer Service (no ingress controller yet).
+  # Launched apps get their own LoadBalancer Service (no ingress controller
+  # yet); `get` is also used by the reverse proxy (backend/src/proxy.rs) to
+  # look up a proxy-enabled deployment's ClusterIP to connect to.
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["create", "get"]

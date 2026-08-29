@@ -68,7 +68,7 @@ backend/src/auth.rs        Password hashing, session cookie, CurrentUser/AdminUs
 backend/src/users.rs       Users admin CRUD (admin-only)
 backend/src/validate.rs    Input validation (k8s names, ports, quantities, env keys, ...)
 backend/src/visibility.rs  Per-user pod filtering + credential/proxy-path enrichment (admin sees all, user sees own)
-backend/src/proxy.rs       Reverse proxy for proxy-enabled templates (JupyterLab) — portforward + credential injection
+backend/src/proxy.rs       Reverse proxy for proxy-enabled templates (JupyterLab) — ClusterIP connection + credential injection
 frontend/src/login.rs      Login page
 frontend/src/pods_tab.rs   Pods tab + detail panel
 frontend/src/create_deployment_tab.rs   Launch tab (template dropdown + form)
@@ -247,16 +247,23 @@ ownership filtering applies). Re-launching under the same Deployment name
 replaces the stored value.
 
 **JupyterLab goes one step further and genuinely works like JupyterHub**:
-its template is `proxy_enabled`, so launching it skips the public
-LoadBalancer Service entirely — the *only* way to reach it is Aether's own
-`GET/POST/... /proxy/<name>/{*rest}` route (`backend/src/proxy.rs`), which:
+its template is `proxy_enabled`, which doesn't change what gets created at
+launch time (it still gets the same `LoadBalancer` Service as any other
+templated app, directly reachable the same way) — it adds a *second*,
+friction-free way in: Aether's own `GET/POST/... /proxy/<name>/{*rest}`
+route (`backend/src/proxy.rs`), which:
 
 1. Checks you own that deployment (or are an admin) — same rule as the Pods
    tab's visibility filtering.
-2. Reaches the pod via `Api<Pod>::portforward` — the same mechanism
-   `kubectl port-forward` uses — tunneling through the API server connection
-   Aether already has. No Service/ClusterIP is ever created for these
-   deployments.
+2. Looks up that Service and connects to its in-cluster `ClusterIP` directly
+   (`kube`'s `Api<Service>::get`, RBAC already covers `get` on `services`).
+   This is the conventional in-cluster design, and it assumes Aether itself
+   is running **in-cluster** — a `ClusterIP` isn't routable from outside the
+   cluster network, so this specific hop can't be exercised with the backend
+   running locally against a remote cluster, unlike everything else in this
+   app (see "Status & known limitations"). The connection attempt times out
+   after 5 seconds either way, so a stuck/unready pod fails fast rather than
+   hanging the request.
 3. Injects `Authorization: token <value>` (Jupyter Server's documented
    token-header convention) into every proxied request, so you land directly
    in a logged-in JupyterLab session — click "Open" on the Pods tab (or the
@@ -283,10 +290,12 @@ bearer-token-via-header usage without needing a proxy in front of it, and
 forcing it through Aether's cookie-based login would only get in the way of
 automation.
 
-Each proxied HTTP request currently opens a fresh port-forward tunnel and
+Each proxied HTTP request currently opens a fresh TCP connection and
 HTTP/1.1 handshake to the pod rather than reusing a pooled connection —
 correct and simple, but adds latency per request; pooling is a reasonable
-future optimization, not a correctness issue.
+future optimization, not a correctness issue. The connection attempt times
+out after 5 seconds, so an unready or unreachable pod fails fast (502)
+instead of hanging the request.
 
 ## Building the container image
 
@@ -353,10 +362,10 @@ watched namespace = deployed namespace). They're pinned to `amd64` nodes via
    - `ServiceAccount` + `Role`/`RoleBinding` (`aether`) — scoped to the
      `ollama` namespace only, no cluster-wide permissions: `get`/`list`/`watch`
      on `pods` plus `get` on `pods/log` and `get`/`list` on `events` (Pods tab
-     and its detail panel), `create` on `pods/portforward` (the reverse proxy
-     for proxy-enabled templates), and `create`/`get` on `apps/deployments`
-     and on `services` (Launch tab — the Service is how a non-proxied
-     launched app becomes reachable, since there's no ingress controller).
+     and its detail panel), and `create`/`get` on `apps/deployments` and on
+     `services` (Launch tab — the Service is how a launched app becomes
+     reachable, since there's no ingress controller; `get` is also used by
+     the reverse proxy to look up a proxy-enabled deployment's ClusterIP).
    - `Deployment` (`aether`) — 1 replica, resource requests/limits set, health
      probes on `/api/pods`, hardened `securityContext` (non-root, read-only
      root filesystem, all capabilities dropped).
@@ -428,16 +437,14 @@ attributes client-side for early feedback:
 
 **Kubernetes RBAC** is minimal and namespaced (no `ClusterRole`): read-only
 (`get`/`list`/`watch`) on `pods`, `get` on `pods/log`, `get`/`list` on
-`events`, `create` on `pods/portforward` (the reverse proxy tunnels through
-this — the same permission `kubectl port-forward` needs), plus `create`/`get`
-on `apps/deployments` and on `services` — nothing else. The app can create
-Deployments and Services but can't delete, patch, list, or watch existing
-ones, and has no access to Secrets, ConfigMaps, RBAC objects, etc. Note that
-`pods/portforward` is a real capability worth naming explicitly: it lets the
-backend reach any pod's ports in the namespace directly, not just
-proxy-enabled ones — the actual restriction to "your own proxy-enabled
-deployments only" is enforced in application code (`backend/src/proxy.rs`),
-not by this RBAC rule.
+`events`, plus `create`/`get` on `apps/deployments` and on `services` —
+nothing else. The app can create Deployments and Services but can't delete,
+patch, list, or watch existing ones, and has no access to Secrets,
+ConfigMaps, RBAC objects, etc. The reverse proxy doesn't need any RBAC
+beyond `get` on `services` (already listed above) — it never talks to the
+Kubernetes API to reach the app itself, just to look up a Service's
+ClusterIP, then connects to that IP directly over plain TCP like any other
+in-cluster client would.
 
 **Other:**
 
@@ -550,13 +557,25 @@ serving static pages. Known gaps, in case they matter for what you do next:
   same kind of caveat), vLLM because it's meant for scripted API clients
   where a proxied cookie-auth flow would be more friction, not less. See
   "Ownership, auto-generated credentials, and the reverse proxy" above.
-- **The reverse proxy opens a fresh port-forward tunnel per HTTP request**,
-  not a pooled/reused connection — correctness over performance for this
-  first pass. Fine for interactive single-user use; would need pooling
-  before it'd hold up under heavier concurrent load.
-- **`pods/portforward` RBAC is namespace-wide**, not scoped to individual
-  pods — the backend's own application code is what restricts the reverse
-  proxy to a deployment's owner (or an admin), not Kubernetes RBAC itself.
+- **The reverse proxy opens a fresh TCP connection per HTTP request**, not a
+  pooled/reused one — correctness over performance for this first pass. Fine
+  for interactive single-user use; would need pooling before it'd hold up
+  under heavier concurrent load.
+- **The reverse proxy assumes Aether itself runs in-cluster** — it connects
+  to a proxy-enabled deployment's Service via its `ClusterIP`, which isn't
+  routable from outside the cluster network. This is the one code path in
+  this app that can't be exercised with the backend running locally against
+  a remote cluster (this project's usual local-dev pattern); testing it for
+  real requires actually deploying Aether via `k8s/` (see "Not yet deployed
+  for real" below) — it was instead verified by curling a proxy-enabled
+  deployment's ClusterIP with the exact header Aether would send, from a
+  throwaway pod inside the cluster, to confirm the target app accepts it
+  correctly; the Rust-side HTTP/WebSocket-tunneling code was verified
+  end-to-end in an earlier revision of this feature that used a different
+  (pod-portforward-based) transport, then swapped in place — a small,
+  well-contained change (only *how* a byte stream to the pod is obtained
+  changed, not what's done with it), but that swap itself hasn't been
+  exercised with a real Aether instance actually running in-cluster yet.
 - **Dashboard is dark-mode only**, no light theme or user preference toggle.
   Colors are pulled from the project's validated dark dashboard palette
   (status/accent/surface tokens) rather than picked ad hoc — keep new UI

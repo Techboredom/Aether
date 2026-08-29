@@ -2,15 +2,20 @@
 //! pod, injecting its auto-generated credential so there's no login prompt —
 //! the "JupyterHub-style" part of the auto-generated-credentials feature.
 //!
-//! Reaches the pod via `Api<Pod>::portforward` (the same mechanism
-//! `kubectl port-forward` uses) rather than a Service/ClusterIP: it tunnels
-//! through the API server connection Aether already has, so it works
-//! whether the backend runs in-cluster or (as in local dev) against a
-//! remote cluster over kubeconfig, and needs no Service object at all.
+//! Reaches the pod via its `Service`'s in-cluster `ClusterIP` — the same
+//! Service every other template already gets (proxy-enabled templates don't
+//! skip Service creation; they still get their usual `LoadBalancer` Service
+//! too, for direct access same as any other launched app). This is the
+//! conventional in-cluster design and assumes Aether itself runs in-cluster
+//! in production; it does **not** work with the backend running locally
+//! against a remote cluster, since a `ClusterIP` isn't routable from outside
+//! the cluster network — unlike the rest of this app, this one code path
+//! can't be exercised from a local dev machine without actually deploying
+//! Aether into the cluster.
 //!
 //! Only templates with `proxy_enabled` (currently just JupyterLab — see
 //! `backend/migrations/0005_add_proxy_support.sql`) ever reach this code
-//! path; everything else still gets its own public LoadBalancer Service.
+//! path.
 
 use axum::body::{to_bytes, Body};
 use axum::extract::{Path, Request, State};
@@ -20,8 +25,9 @@ use axum::response::Response;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper_util::rt::TokioIo;
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::Service;
 use kube::api::Api;
+use tokio::net::TcpStream;
 
 use crate::auth::CurrentUser;
 use crate::error::ApiError;
@@ -54,19 +60,22 @@ pub async fn handler(
         return Err(ApiError::Forbidden("you don't own this deployment".to_string()));
     }
 
-    let Some(pod_name) = state.running_pod_for_deployment(&deployment_name).await else {
-        return Err(ApiError::ProxyUnavailable(format!("{deployment_name} has no running pod yet")));
-    };
-
     let port = target.container_port as u16;
-    let pods: Api<Pod> = Api::namespaced(state.client.clone(), &state.namespace);
-    let mut forwarder = pods
-        .portforward(&pod_name, &[port])
+    let services: Api<Service> = Api::namespaced(state.client.clone(), &state.namespace);
+    let service = services
+        .get(&deployment_name)
         .await
+        .map_err(|err| ApiError::ProxyUnavailable(format!("couldn't look up {deployment_name}'s Service: {err}")))?;
+    let cluster_ip = service
+        .spec
+        .and_then(|spec| spec.cluster_ip)
+        .filter(|ip| ip != "None")
+        .ok_or_else(|| ApiError::ProxyUnavailable(format!("{deployment_name} has no ClusterIP yet")))?;
+
+    let stream = tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect((cluster_ip.as_str(), port)))
+        .await
+        .map_err(|_| ApiError::ProxyUnavailable(format!("timed out connecting to {deployment_name}")))?
         .map_err(|err| ApiError::ProxyUnavailable(format!("couldn't reach {deployment_name}: {err}")))?;
-    let stream = forwarder
-        .take_stream(port)
-        .ok_or_else(|| ApiError::ProxyUnavailable(format!("no port-forward stream for {deployment_name}")))?;
 
     let (mut sender, conn) = hyper::client::conn::http1::handshake::<_, Full<Bytes>>(TokioIo::new(stream))
         .await

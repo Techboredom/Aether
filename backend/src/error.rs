@@ -11,8 +11,9 @@ pub enum ApiError {
     BadRequest(String),
     Unauthorized,
     Forbidden(String),
-    /// The proxied app couldn't be reached (no running pod, portforward/handshake
-    /// failure, ...) — distinct from `BadRequest` since it's not the caller's fault.
+    /// The proxied app couldn't be reached (connection timeout/failure,
+    /// handshake failure, ...) — distinct from `BadRequest` since it's not
+    /// the caller's fault.
     ProxyUnavailable(String),
 }
 
