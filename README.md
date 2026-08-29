@@ -13,22 +13,32 @@ Launch; only admins see Templates and Users.
 
 - **Pods** — shows the running pods live, with their basic resource info:
   CPU/memory requests and limits, accelerators (GPUs, etc.), status, node,
-  restarts, and age. Click a row to open its detail panel: per-container
-  state and failure reason (`CrashLoopBackOff`, `ImagePullBackOff`, exit
-  codes, etc.), recent Kubernetes Events, and a log viewer (container
-  picker, tail length, previous-container logs for ones that crashed).
+  restarts, and age. A regular `user` only sees pods they launched
+  themselves; an `admin` sees every pod in the namespace plus an **Owner**
+  column showing who launched each one. A **Credential** column shows the
+  auto-generated login token/password/API key for templates that have one
+  (see "Auto-generated credentials" below), click-to-select for copying.
+  Click a row to open its detail panel: per-container state and failure
+  reason (`CrashLoopBackOff`, `ImagePullBackOff`, exit codes, etc.), recent
+  Kubernetes Events, and a log viewer (container picker, tail length,
+  previous-container logs for ones that crashed).
 - **Launch** — creates a `Deployment` (and, if a container port is given, a
   matching `LoadBalancer` Service, since there's no ingress) in that
-  namespace. The form's first field is a **Template** dropdown — Ollama,
-  vLLM, SGLang (Intelligence Layer) or JupyterLab, RStudio (Interface
-  Layer), or **Custom** — which pre-fills image, port, resource sizing, GPU
-  defaults, and any default env vars/args for that template. Every
-  pre-filled field stays editable, and Custom picks any image from the
-  Postgres-backed image catalog instead.
+  namespace, owned by whichever account launched it. The form's first field
+  is a **Template** dropdown — Ollama, vLLM, SGLang (Intelligence Layer) or
+  JupyterLab, RStudio (Interface Layer), or **Custom** — which pre-fills
+  image, port, resource sizing, GPU defaults, and any default env vars/args
+  for that template. Every pre-filled field stays editable, and Custom picks
+  any image from the Postgres-backed image catalog instead. Templates that
+  carry a `secret_env_key` (JupyterLab, RStudio, vLLM) hide that field from
+  the form entirely and generate a random value for it at launch time
+  instead — shown once in the success message and persistently on the Pods
+  tab, no need to invent or type one yourself.
 - **Templates** *(admin only)* — CRUD for the templates the Launch tab
   offers: a table of existing templates (edit/delete) and a form to add a
   new one (same fields as a template pre-fills into Launch, plus notes shown
-  when it's selected there).
+  when it's selected there, plus an optional "auto-generate a secret for
+  this env var" field — see below).
 - **Users** *(admin only)* — create accounts (username, password, role) and
   delete them. No self-service signup, no password reset flow — an admin
   does both.
@@ -52,6 +62,7 @@ backend/migrations/        sqlx migrations, auto-run on startup
 backend/src/auth.rs        Password hashing, session cookie, CurrentUser/AdminUser extractors, login/logout/me
 backend/src/users.rs       Users admin CRUD (admin-only)
 backend/src/validate.rs    Input validation (k8s names, ports, quantities, env keys, ...)
+backend/src/visibility.rs  Per-user pod filtering + credential enrichment (admin sees all, user sees own)
 frontend/src/login.rs      Login page
 frontend/src/pods_tab.rs   Pods tab + detail panel
 frontend/src/create_deployment_tab.rs   Launch tab (template dropdown + form)
@@ -126,13 +137,13 @@ additionally require the `admin` role (403 otherwise).
 - `GET /api/users` *(admin)* — list accounts (id, username, role — never password hashes)
 - `POST /api/users` *(admin)* — create an account; body `{username, password, role}` (`role` is `"admin"` or `"user"`); username 3-32 chars, password ≥ 8 chars
 - `DELETE /api/users/{id}` *(admin)* — delete an account; an admin can't delete their own account (guards against an easy self-lockout)
-- `GET /api/pods` — JSON snapshot of the current pods in the watched namespace
-- `GET /ws` — WebSocket; sends a full snapshot on connect, then `upsert`/`delete` events as pods change
+- `GET /api/pods` — JSON snapshot of the current pods in the watched namespace, filtered by role: a `user` only gets pods whose `aether.io/owner` label matches their own username, an `admin` gets all of them (each with its `owner` field populated). Pods for templates with a `secret_env_key` also carry a `credential: {env_key, value}` looked up from `deployment_secrets`.
+- `GET /ws` — WebSocket; sends a full snapshot on connect (same per-role filtering and credential enrichment as `GET /api/pods`), then `upsert`/`delete` events as pods change, filtered the same way per-connection
 - `GET /api/images` — JSON list of catalog entries from the `images` table (id, name, image, description)
 - `GET /api/templates` — JSON list of templates (any logged-in role — needed for the Launch tab's dropdown)
-- `POST /api/templates` / `PUT /api/templates/{id}` *(admin)* — create/update a template. Body is a `TemplateEntry` minus `id`: `{name, image, container_port, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, env, args, notes}` — only `name`/`image` are required, everything else defaults to empty/`null`.
+- `POST /api/templates` / `PUT /api/templates/{id}` *(admin)* — create/update a template. Body is a `TemplateEntry` minus `id`: `{name, image, container_port, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, env, args, notes, secret_env_key}` — only `name`/`image` are required, everything else defaults to empty/`null`. `secret_env_key`, if set, is the env var name (e.g. `JUPYTER_TOKEN`) that Launch should auto-generate instead of showing as an editable field.
 - `DELETE /api/templates/{id}` *(admin)* — delete a template
-- `POST /api/deployments` — creates a `Deployment` in the watched namespace, and if `container_port` is set, also a `LoadBalancer` Service exposing it (no ingress controller in the cluster, so this is how a launched app becomes reachable). Body: `{name, image, replicas, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, container_port, env, args}` — everything except `name`/`image`/`replicas` is optional; `env` is `[[key, value], ...]` pairs (entries with an empty value are dropped, so an image's own default behavior — e.g. an auto-generated password logged at startup — still applies unless you set one); `args` is a list of container command-line arguments. Response adds `service_name`/`container_port` (both `null` if no port was given).
+- `POST /api/deployments` — creates a `Deployment` in the watched namespace (labeled `aether.io/owner: <your username>`), and if `container_port` is set, also a `LoadBalancer` Service exposing it (no ingress controller in the cluster, so this is how a launched app becomes reachable). Body: `{name, image, replicas, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, container_port, env, args, generate_secret_for}` — everything except `name`/`image`/`replicas` is optional; `env` is `[[key, value], ...]` pairs (entries with an empty value are dropped, so an image's own default behavior — e.g. an auto-generated password logged at startup — still applies unless you set one); `args` is a list of container command-line arguments; `generate_secret_for`, if set to an env var name, generates a random value for it (overriding anything with that key in `env`) and stores it in `deployment_secrets`. Response adds `service_name`/`container_port` (both `null` if no port was given) and `secret_value` (the generated value, or `null` if `generate_secret_for` wasn't set).
 - `GET /api/pods/{name}/logs?container=&tail_lines=&previous=` — plain-text container logs (`container` defaults to the pod's only container if it has one; `tail_lines` defaults to 500; `previous=true` gets the last terminated instance's logs, for a crashed container)
 - `GET /api/pods/{name}/events` — JSON list of Kubernetes Events involving that pod (`type_`, `reason`, `message`, `count`, `last_seen`), most recent first — note the apiserver's default Event TTL is short (commonly ~1h), so older pods often have none left
 - `GET /*` — serves the built frontend (`index.html`, JS, WASM, CSS)
@@ -180,13 +191,61 @@ CREATE TABLE templates (
     env JSONB NOT NULL DEFAULT '[]',    -- [["KEY", "default value"], ...]
     args TEXT[] NOT NULL DEFAULT '{}',  -- ["--model=...", ...]
     notes TEXT NOT NULL DEFAULT '',
+    secret_env_key TEXT,                -- e.g. "JUPYTER_TOKEN"; NULL means no auto-generated secret
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
 
 It ships seeded with the same five templates (Ollama, vLLM, SGLang,
 JupyterLab, RStudio) that used to be hardcoded in the frontend — edit or
-delete them from the Templates tab like any other row.
+delete them from the Templates tab like any other row. JupyterLab
+(`JUPYTER_TOKEN`), RStudio (`PASSWORD`), and vLLM (`VLLM_API_KEY`) are seeded
+with a `secret_env_key`; Ollama and SGLang aren't (Ollama has no auth
+mechanism at all, and SGLang's equivalent env var name wasn't confirmed).
+
+## Ownership and auto-generated credentials
+
+Every `Deployment`/pod/Service created via Launch is labeled
+`aether.io/owner: <username>` (a Kubernetes label, kept separate from the
+`app: <name>` selector label so it can't interfere with Service routing).
+The Pods tab and its underlying REST/WebSocket endpoints filter on this
+label: a `user` account only ever sees pods it launched itself; an `admin`
+sees everything, with an extra **Owner** column.
+
+Templates with a `secret_env_key` (JupyterLab, RStudio, vLLM) don't expose
+that field as editable input on the Launch form at all — instead, the
+backend generates a random 48-character alphanumeric value (the same
+generator used for session tokens), injects it as that env var on the
+container, and stores it in a `deployment_secrets` table keyed by the
+Deployment's name:
+
+```sql
+CREATE TABLE deployment_secrets (
+    deployment_name TEXT PRIMARY KEY,
+    namespace TEXT NOT NULL,
+    env_key TEXT NOT NULL,
+    secret_value TEXT NOT NULL,
+    owner_username TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+The value is shown once in the Launch success message and persistently in
+the Pods tab's Credential column (for whoever can see that pod — the same
+ownership filtering applies). Re-launching under the same Deployment name
+replaces the stored value.
+
+**This is not JupyterHub-style transparent auth.** JupyterHub sits a reverse
+proxy in front of every spawned server and injects the token as a header on
+every request automatically, so the user never sees or handles it. This
+cluster has no ingress/reverse-proxy layer (see "Status & known
+limitations"), so that's out of scope here — what's implemented instead is
+the buildable subset: the credential is generated and displayed for you
+instead of you having to invent and type one. You still have to paste it
+into JupyterLab's/RStudio's own login prompt yourself. The one case that
+*does* match real bearer-token-via-header usage is vLLM's `VLLM_API_KEY`,
+since it's consumed by API clients you configure yourself (`Authorization:
+Bearer <key>`), not by a browser session needing a proxy in front of it.
 
 ## Building the container image
 
@@ -339,10 +398,20 @@ ConfigMaps, RBAC objects, etc.
   namespace, and (via Launch) can create a Service with a public-facing
   LoadBalancer IP — there's no admission control over what gets exposed.
 - Templates (Ollama/vLLM/SGLang/JupyterLab/RStudio) are unauthenticated *at
-  the app they launch* by default: Ollama has no auth at all, and
-  JupyterLab/RStudio only get a token/password if you set one in the form
-  (otherwise they generate a random one, visible only in the pod's logs).
-  This is unrelated to logging into Aether itself.
+  the app they launch* by default, unrelated to logging into Aether itself.
+  Ollama and SGLang have no auto-generated credential (see "Ownership and
+  auto-generated credentials" above) — set your own token/password via the
+  env var editor if the image supports one, otherwise it's either unauthenticated
+  or gets a random value visible only in the pod's own logs. JupyterLab,
+  RStudio, and vLLM get an auto-generated credential, stored **in plaintext**
+  in the `deployment_secrets` table (no encryption at rest) and visible to
+  the owning user and any admin via the Pods tab.
+- Pod ownership (`aether.io/owner` label) and the Pods-tab visibility
+  filtering it drives are enforced entirely in the Aether backend at read
+  time, not via Kubernetes RBAC or admission control — the label itself is
+  just metadata anyone with direct `kubectl` access to the namespace can see
+  or edit. It restricts what Aether's UI/API surface shows a `user` account,
+  not what's actually running in the cluster.
 - The container runs as a non-root user with a read-only root filesystem and
   all Linux capabilities dropped.
 - `CorsLayer::permissive()` is enabled on the backend to make local `trunk
@@ -411,6 +480,18 @@ case they matter for what you do next:
   means deploying multiple copies (see "Watching a different namespace").
 - **No way to scale, delete, or edit a Deployment/Service from the UI** —
   only create. Same for pods: no delete/restart action, view-only plus logs.
+- **`VLLM_API_KEY` is an educated guess, not a confirmed env var name** — it
+  hasn't been verified against a real vLLM server run (see the vLLM
+  templates gap above). If vLLM ignores it, the generated value shown in the
+  UI simply won't do anything.
+- **Auto-generated credentials are plaintext in Postgres**, not a Kubernetes
+  `Secret` or any encrypted store, and persist after the pod that used them
+  is gone (no cleanup job) — anyone with `deployment_secrets` table access
+  can read every credential ever generated, past or present.
+- **No true JupyterHub-style header injection.** There's no reverse proxy in
+  front of launched apps, so credentials are generated and displayed for
+  copy/paste, not transparently attached to your requests. See "Ownership
+  and auto-generated credentials" above for the one exception (vLLM).
 - **Dashboard is dark-mode only**, no light theme or user preference toggle.
   Colors are pulled from the project's validated dark dashboard palette
   (status/accent/surface tokens) rather than picked ad hoc — keep new UI

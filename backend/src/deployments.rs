@@ -12,13 +12,14 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{Api, PostParams};
 
-use crate::auth::CurrentUser;
+use crate::auth::{generate_token, CurrentUser};
 use crate::error::ApiError;
+use crate::resources::OWNER_LABEL;
 use crate::state::AppState;
 use crate::validate;
 
 pub async fn create_deployment(
-    _user: CurrentUser,
+    user: CurrentUser,
     State(state): State<AppState>,
     Json(req): Json<CreateDeploymentRequest>,
 ) -> Result<Json<CreateDeploymentResponse>, ApiError> {
@@ -47,6 +48,9 @@ pub async fn create_deployment(
     }
     validate::bounded_list("env", &req.env.iter().map(|(_, v)| v.clone()).collect::<Vec<_>>(), 50, 4096)?;
     validate::bounded_list("args", &req.args, 50, 1024)?;
+    if let Some(key) = &req.generate_secret_for {
+        validate::env_key(key)?;
+    }
 
     let mut requests = BTreeMap::new();
     let mut limits = BTreeMap::new();
@@ -70,37 +74,50 @@ pub async fn create_deployment(
             limits.insert(accel_type.clone(), qty);
         }
 
-    let env: Vec<EnvVar> = req
+    // A generated secret always wins over a same-keyed manual entry, so the
+    // "auto-generate" behavior can't be silently bypassed via the generic env list.
+    let mut env: Vec<EnvVar> = req
         .env
         .iter()
-        .filter(|(_, value)| !value.trim().is_empty())
+        .filter(|(key, value)| !value.trim().is_empty() && Some(key) != req.generate_secret_for.as_ref())
         .map(|(name, value)| EnvVar {
             name: name.clone(),
             value: Some(value.clone()),
             ..Default::default()
         })
         .collect();
+    let generated_secret = req.generate_secret_for.as_ref().map(|key| {
+        let value = generate_token();
+        env.push(EnvVar { name: key.clone(), value: Some(value.clone()), ..Default::default() });
+        value
+    });
     let args: Vec<String> = req.args.iter().map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect();
 
-    let mut labels = BTreeMap::new();
-    labels.insert("app".to_string(), req.name.clone());
+    // The selector must stay a fixed, minimal set of labels the pod template
+    // always carries; `owner` rides along as an extra descriptive label on
+    // top of it (on the Deployment, its pods, and the Service), not part of
+    // the selector itself.
+    let mut selector_labels = BTreeMap::new();
+    selector_labels.insert("app".to_string(), req.name.clone());
+    let mut object_labels = selector_labels.clone();
+    object_labels.insert(OWNER_LABEL.to_string(), user.username.clone());
 
     let deployment = Deployment {
         metadata: ObjectMeta {
             name: Some(req.name.clone()),
             namespace: Some(state.namespace.clone()),
-            labels: Some(labels.clone()),
+            labels: Some(object_labels.clone()),
             ..Default::default()
         },
         spec: Some(DeploymentSpec {
             replicas: Some(req.replicas),
             selector: LabelSelector {
-                match_labels: Some(labels.clone()),
+                match_labels: Some(selector_labels.clone()),
                 ..Default::default()
             },
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
-                    labels: Some(labels.clone()),
+                    labels: Some(object_labels.clone()),
                     ..Default::default()
                 }),
                 spec: Some(PodSpec {
@@ -136,12 +153,12 @@ pub async fn create_deployment(
             metadata: ObjectMeta {
                 name: Some(name.clone()),
                 namespace: Some(state.namespace.clone()),
-                labels: Some(labels.clone()),
+                labels: Some(object_labels),
                 ..Default::default()
             },
             spec: Some(ServiceSpec {
                 type_: Some("LoadBalancer".to_string()),
-                selector: Some(labels),
+                selector: Some(selector_labels),
                 ports: Some(vec![ServicePort {
                     port,
                     target_port: Some(IntOrString::Int(port)),
@@ -156,10 +173,28 @@ pub async fn create_deployment(
         service_name = created_service.metadata.name;
     }
 
+    if let (Some(key), Some(value)) = (&req.generate_secret_for, &generated_secret) {
+        sqlx::query(
+            "INSERT INTO deployment_secrets (deployment_name, namespace, env_key, secret_value, owner_username) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (deployment_name) DO UPDATE SET \
+                namespace = EXCLUDED.namespace, env_key = EXCLUDED.env_key, \
+                secret_value = EXCLUDED.secret_value, owner_username = EXCLUDED.owner_username",
+        )
+        .bind(&name)
+        .bind(&state.namespace)
+        .bind(key)
+        .bind(value)
+        .bind(&user.username)
+        .execute(&state.pg)
+        .await?;
+    }
+
     Ok(Json(CreateDeploymentResponse {
         name,
         namespace: state.namespace,
         service_name,
         container_port: req.container_port,
+        secret_value: generated_secret,
     }))
 }

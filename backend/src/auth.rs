@@ -28,7 +28,9 @@ pub fn verify_password(hash: &str, password: &str) -> bool {
     Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok()
 }
 
-fn generate_token() -> String {
+/// A high-entropy random token, used both for session cookies and for
+/// auto-generated app credentials (JupyterLab tokens, RStudio passwords, ...).
+pub fn generate_token() -> String {
     rand::rng().sample_iter(Alphanumeric).take(48).map(char::from).collect()
 }
 

@@ -624,6 +624,31 @@ tbody tr:hover {
   color: var(--status-warning);
 }
 
+.credential {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.credential-key {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.credential-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--status-good);
+  background: var(--page);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  cursor: text;
+  user-select: all;
+}
+
 /* Pod detail panel */
 
 .overlay {
