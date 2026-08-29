@@ -16,29 +16,34 @@ Launch; only admins see Templates and Users.
   restarts, and age. A regular `user` only sees pods they launched
   themselves; an `admin` sees every pod in the namespace plus an **Owner**
   column showing who launched each one. A **Credential** column shows the
-  auto-generated login token/password/API key for templates that have one
-  (see "Auto-generated credentials" below), click-to-select for copying.
-  Click a row to open its detail panel: per-container state and failure
-  reason (`CrashLoopBackOff`, `ImagePullBackOff`, exit codes, etc.), recent
-  Kubernetes Events, and a log viewer (container picker, tail length,
-  previous-container logs for ones that crashed).
-- **Launch** — creates a `Deployment` (and, if a container port is given, a
-  matching `LoadBalancer` Service, since there's no ingress) in that
-  namespace, owned by whichever account launched it. The form's first field
-  is a **Template** dropdown — Ollama, vLLM, SGLang (Intelligence Layer) or
-  JupyterLab, RStudio (Interface Layer), or **Custom** — which pre-fills
-  image, port, resource sizing, GPU defaults, and any default env vars/args
-  for that template. Every pre-filled field stays editable, and Custom picks
-  any image from the Postgres-backed image catalog instead. Templates that
-  carry a `secret_env_key` (JupyterLab, RStudio, vLLM) hide that field from
-  the form entirely and generate a random value for it at launch time
-  instead — shown once in the success message and persistently on the Pods
-  tab, no need to invent or type one yourself.
+  auto-generated login token/password/API key for templates that have one,
+  click-to-select for copying — and for proxy-enabled templates (JupyterLab),
+  an **Open** link that lands you in an already-logged-in session with zero
+  copy-paste (see "Ownership, auto-generated credentials, and the reverse
+  proxy" below). Click a row to open its detail panel: per-container state
+  and failure reason (`CrashLoopBackOff`, `ImagePullBackOff`, exit codes,
+  etc.), recent Kubernetes Events, and a log viewer (container picker, tail
+  length, previous-container logs for ones that crashed).
+- **Launch** — creates a `Deployment` (and, if a container port is given and
+  the template isn't proxy-enabled, a matching `LoadBalancer` Service, since
+  there's no ingress) in that namespace, owned by whichever account launched
+  it. The form's first field is a **Template** dropdown — Ollama, vLLM,
+  SGLang (Intelligence Layer) or JupyterLab, RStudio (Interface Layer), or
+  **Custom** — which pre-fills image, port, resource sizing, GPU defaults,
+  and any default env vars/args for that template. Every pre-filled field
+  stays editable, and Custom picks any image from the Postgres-backed image
+  catalog instead. Templates that carry a `secret_env_key` (JupyterLab,
+  RStudio, vLLM) hide that field from the form entirely and generate a
+  random value for it at launch time instead — shown once in the success
+  message and persistently on the Pods tab, no need to invent or type one
+  yourself. JupyterLab additionally skips the public Service altogether and
+  is only reachable by clicking "Open" — Aether proxies straight into it
+  with the token already applied.
 - **Templates** *(admin only)* — CRUD for the templates the Launch tab
   offers: a table of existing templates (edit/delete) and a form to add a
   new one (same fields as a template pre-fills into Launch, plus notes shown
   when it's selected there, plus an optional "auto-generate a secret for
-  this env var" field — see below).
+  this env var" field and a "proxy through Aether" checkbox — see below).
 - **Users** *(admin only)* — create accounts (username, password, role) and
   delete them. No self-service signup, no password reset flow — an admin
   does both.
@@ -62,7 +67,8 @@ backend/migrations/        sqlx migrations, auto-run on startup
 backend/src/auth.rs        Password hashing, session cookie, CurrentUser/AdminUser extractors, login/logout/me
 backend/src/users.rs       Users admin CRUD (admin-only)
 backend/src/validate.rs    Input validation (k8s names, ports, quantities, env keys, ...)
-backend/src/visibility.rs  Per-user pod filtering + credential enrichment (admin sees all, user sees own)
+backend/src/visibility.rs  Per-user pod filtering + credential/proxy-path enrichment (admin sees all, user sees own)
+backend/src/proxy.rs       Reverse proxy for proxy-enabled templates (JupyterLab) — portforward + credential injection
 frontend/src/login.rs      Login page
 frontend/src/pods_tab.rs   Pods tab + detail panel
 frontend/src/create_deployment_tab.rs   Launch tab (template dropdown + form)
@@ -137,13 +143,14 @@ additionally require the `admin` role (403 otherwise).
 - `GET /api/users` *(admin)* — list accounts (id, username, role — never password hashes)
 - `POST /api/users` *(admin)* — create an account; body `{username, password, role}` (`role` is `"admin"` or `"user"`); username 3-32 chars, password ≥ 8 chars
 - `DELETE /api/users/{id}` *(admin)* — delete an account; an admin can't delete their own account (guards against an easy self-lockout)
-- `GET /api/pods` — JSON snapshot of the current pods in the watched namespace, filtered by role: a `user` only gets pods whose `aether.io/owner` label matches their own username, an `admin` gets all of them (each with its `owner` field populated). Pods for templates with a `secret_env_key` also carry a `credential: {env_key, value}` looked up from `deployment_secrets`.
+- `GET /api/pods` — JSON snapshot of the current pods in the watched namespace, filtered by role: a `user` only gets pods whose `aether.io/owner` label matches their own username, an `admin` gets all of them (each with its `owner` field populated). Pods for templates with a `secret_env_key` also carry a `credential: {env_key, value}` looked up from `deployment_secrets`, and pods for proxy-enabled templates carry a `proxy_path: "/proxy/<name>/"`.
 - `GET /ws` — WebSocket; sends a full snapshot on connect (same per-role filtering and credential enrichment as `GET /api/pods`), then `upsert`/`delete` events as pods change, filtered the same way per-connection
 - `GET /api/images` — JSON list of catalog entries from the `images` table (id, name, image, description)
 - `GET /api/templates` — JSON list of templates (any logged-in role — needed for the Launch tab's dropdown)
-- `POST /api/templates` / `PUT /api/templates/{id}` *(admin)* — create/update a template. Body is a `TemplateEntry` minus `id`: `{name, image, container_port, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, env, args, notes, secret_env_key}` — only `name`/`image` are required, everything else defaults to empty/`null`. `secret_env_key`, if set, is the env var name (e.g. `JUPYTER_TOKEN`) that Launch should auto-generate instead of showing as an editable field.
+- `POST /api/templates` / `PUT /api/templates/{id}` *(admin)* — create/update a template. Body is a `TemplateEntry` minus `id`: `{name, image, container_port, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, env, args, notes, secret_env_key, proxy_enabled}` — only `name`/`image` are required, everything else defaults to empty/`null`/`false`. `secret_env_key`, if set, is the env var name (e.g. `JUPYTER_TOKEN`) that Launch should auto-generate instead of showing as an editable field. `proxy_enabled`, if `true`, requires `secret_env_key` to also be set (400 otherwise).
 - `DELETE /api/templates/{id}` *(admin)* — delete a template
-- `POST /api/deployments` — creates a `Deployment` in the watched namespace (labeled `aether.io/owner: <your username>`), and if `container_port` is set, also a `LoadBalancer` Service exposing it (no ingress controller in the cluster, so this is how a launched app becomes reachable). Body: `{name, image, replicas, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, container_port, env, args, generate_secret_for}` — everything except `name`/`image`/`replicas` is optional; `env` is `[[key, value], ...]` pairs (entries with an empty value are dropped, so an image's own default behavior — e.g. an auto-generated password logged at startup — still applies unless you set one); `args` is a list of container command-line arguments; `generate_secret_for`, if set to an env var name, generates a random value for it (overriding anything with that key in `env`) and stores it in `deployment_secrets`. Response adds `service_name`/`container_port` (both `null` if no port was given) and `secret_value` (the generated value, or `null` if `generate_secret_for` wasn't set).
+- `POST /api/deployments` — creates a `Deployment` in the watched namespace (labeled `aether.io/owner: <your username>`), and if `container_port` is set and `enable_proxy` isn't, also a `LoadBalancer` Service exposing it (no ingress controller in the cluster, so this is how a non-proxied launched app becomes reachable). Body: `{name, image, replicas, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, container_port, env, args, generate_secret_for, enable_proxy}` — everything except `name`/`image`/`replicas` is optional; `env` is `[[key, value], ...]` pairs (entries with an empty value are dropped, so an image's own default behavior — e.g. an auto-generated password logged at startup — still applies unless you set one); `args` is a list of container command-line arguments (any occurrence of the literal string `{{name}}` is substituted with the deployment's own name first); `generate_secret_for`, if set to an env var name, generates a random value for it (overriding anything with that key in `env`) and stores it in `deployment_secrets`; `enable_proxy`, if `true`, requires both `generate_secret_for` and `container_port` to be set (400 otherwise), skips creating a Service entirely, and makes the app reachable only via `GET/POST/... /proxy/<name>/...`. Response adds `service_name`/`container_port` (both `null` if no port was given, `service_name` also `null` when proxied), `secret_value` (the generated value, or `null`), and `proxy_path` (`"/proxy/<name>/"` if `enable_proxy` was set, else `null`).
+- `ANY /proxy/{deployment_name}/{*rest}` — reverse-proxies into a proxy-enabled deployment's pod (`backend/src/proxy.rs`), injecting its generated credential as the appropriate auth header so there's no login prompt. 403 if you're not that deployment's owner (or an admin); 400 if the deployment isn't proxy-enabled; 502 if it has no running pod yet or the tunnel fails. Handles WebSocket upgrades transparently (needed for JupyterLab's kernel connections). See "Ownership, auto-generated credentials, and the reverse proxy" below.
 - `GET /api/pods/{name}/logs?container=&tail_lines=&previous=` — plain-text container logs (`container` defaults to the pod's only container if it has one; `tail_lines` defaults to 500; `previous=true` gets the last terminated instance's logs, for a crashed container)
 - `GET /api/pods/{name}/events` — JSON list of Kubernetes Events involving that pod (`type_`, `reason`, `message`, `count`, `last_seen`), most recent first — note the apiserver's default Event TTL is short (commonly ~1h), so older pods often have none left
 - `GET /*` — serves the built frontend (`index.html`, JS, WASM, CSS)
@@ -192,6 +199,7 @@ CREATE TABLE templates (
     args TEXT[] NOT NULL DEFAULT '{}',  -- ["--model=...", ...]
     notes TEXT NOT NULL DEFAULT '',
     secret_env_key TEXT,                -- e.g. "JUPYTER_TOKEN"; NULL means no auto-generated secret
+    proxy_enabled BOOLEAN NOT NULL DEFAULT false,  -- reverse-proxy instead of a public Service; requires secret_env_key
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
@@ -202,15 +210,16 @@ delete them from the Templates tab like any other row. JupyterLab
 (`JUPYTER_TOKEN`), RStudio (`PASSWORD`), and vLLM (`VLLM_API_KEY`) are seeded
 with a `secret_env_key`; Ollama and SGLang aren't (Ollama has no auth
 mechanism at all, and SGLang's equivalent env var name wasn't confirmed).
+Only JupyterLab is seeded `proxy_enabled` — see below.
 
-## Ownership and auto-generated credentials
+## Ownership, auto-generated credentials, and the reverse proxy
 
-Every `Deployment`/pod/Service created via Launch is labeled
-`aether.io/owner: <username>` (a Kubernetes label, kept separate from the
-`app: <name>` selector label so it can't interfere with Service routing).
-The Pods tab and its underlying REST/WebSocket endpoints filter on this
-label: a `user` account only ever sees pods it launched itself; an `admin`
-sees everything, with an extra **Owner** column.
+Every `Deployment`/pod created via Launch is labeled `aether.io/owner:
+<username>` (a Kubernetes label, kept separate from the `app: <name>`
+selector label so it can't interfere with Service routing). The Pods tab
+and its underlying REST/WebSocket endpoints filter on this label: a `user`
+account only ever sees pods it launched itself; an `admin` sees everything,
+with an extra **Owner** column.
 
 Templates with a `secret_env_key` (JupyterLab, RStudio, vLLM) don't expose
 that field as editable input on the Launch form at all — instead, the
@@ -226,6 +235,8 @@ CREATE TABLE deployment_secrets (
     env_key TEXT NOT NULL,
     secret_value TEXT NOT NULL,
     owner_username TEXT NOT NULL,
+    proxy_enabled BOOLEAN NOT NULL DEFAULT false,
+    container_port INTEGER,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
@@ -235,17 +246,47 @@ the Pods tab's Credential column (for whoever can see that pod — the same
 ownership filtering applies). Re-launching under the same Deployment name
 replaces the stored value.
 
-**This is not JupyterHub-style transparent auth.** JupyterHub sits a reverse
-proxy in front of every spawned server and injects the token as a header on
-every request automatically, so the user never sees or handles it. This
-cluster has no ingress/reverse-proxy layer (see "Status & known
-limitations"), so that's out of scope here — what's implemented instead is
-the buildable subset: the credential is generated and displayed for you
-instead of you having to invent and type one. You still have to paste it
-into JupyterLab's/RStudio's own login prompt yourself. The one case that
-*does* match real bearer-token-via-header usage is vLLM's `VLLM_API_KEY`,
-since it's consumed by API clients you configure yourself (`Authorization:
-Bearer <key>`), not by a browser session needing a proxy in front of it.
+**JupyterLab goes one step further and genuinely works like JupyterHub**:
+its template is `proxy_enabled`, so launching it skips the public
+LoadBalancer Service entirely — the *only* way to reach it is Aether's own
+`GET/POST/... /proxy/<name>/{*rest}` route (`backend/src/proxy.rs`), which:
+
+1. Checks you own that deployment (or are an admin) — same rule as the Pods
+   tab's visibility filtering.
+2. Reaches the pod via `Api<Pod>::portforward` — the same mechanism
+   `kubectl port-forward` uses — tunneling through the API server connection
+   Aether already has. No Service/ClusterIP is ever created for these
+   deployments.
+3. Injects `Authorization: token <value>` (Jupyter Server's documented
+   token-header convention) into every proxied request, so you land directly
+   in a logged-in JupyterLab session — click "Open" on the Pods tab (or the
+   Launch success message) and go, no token to copy or paste anywhere.
+4. Transparently tunnels WebSocket upgrades too (via `hyper::upgrade` +
+   `tokio::io::copy_bidirectional`), which is what makes JupyterLab's kernel
+   connections (running notebook cells) work through the proxy, not just
+   static pages.
+
+This requires the template's own `args` to tell the app it's being served
+under a path prefix — JupyterLab's seeded args are `["start-notebook.sh",
+"--ServerApp.base_url=/proxy/{{name}}/"]`, where `{{name}}` is a generic
+placeholder substituted with the deployment's own name at launch time (any
+template's `args` can use it, not just JupyterLab's). **Only JupyterLab
+ships proxy-enabled today** — it has documented, reliable support for both
+the path-prefix flag and the token-header convention. RStudio's equivalent
+(`www-root-path`) hasn't been verified against the `rocker/rstudio` image's
+entrypoint, so it keeps its own public LoadBalancer Service and manual
+credential paste for now (flip its `proxy_enabled` column once that's
+checked). vLLM is intentionally never proxied: its `VLLM_API_KEY` is meant
+for scripted API clients setting their own `Authorization: Bearer <key>`
+header, not a browser session — it already matches real
+bearer-token-via-header usage without needing a proxy in front of it, and
+forcing it through Aether's cookie-based login would only get in the way of
+automation.
+
+Each proxied HTTP request currently opens a fresh port-forward tunnel and
+HTTP/1.1 handshake to the pod rather than reusing a pooled connection —
+correct and simple, but adds latency per request; pooling is a reasonable
+future optimization, not a correctness issue.
 
 ## Building the container image
 
@@ -312,9 +353,10 @@ watched namespace = deployed namespace). They're pinned to `amd64` nodes via
    - `ServiceAccount` + `Role`/`RoleBinding` (`aether`) — scoped to the
      `ollama` namespace only, no cluster-wide permissions: `get`/`list`/`watch`
      on `pods` plus `get` on `pods/log` and `get`/`list` on `events` (Pods tab
-     and its detail panel), and `create`/`get` on `apps/deployments` and on
-     `services` (Launch tab — the Service is how a launched app becomes
-     reachable, since there's no ingress controller).
+     and its detail panel), `create` on `pods/portforward` (the reverse proxy
+     for proxy-enabled templates), and `create`/`get` on `apps/deployments`
+     and on `services` (Launch tab — the Service is how a non-proxied
+     launched app becomes reachable, since there's no ingress controller).
    - `Deployment` (`aether`) — 1 replica, resource requests/limits set, health
      probes on `/api/pods`, hardened `securityContext` (non-root, read-only
      root filesystem, all capabilities dropped).
@@ -386,10 +428,16 @@ attributes client-side for early feedback:
 
 **Kubernetes RBAC** is minimal and namespaced (no `ClusterRole`): read-only
 (`get`/`list`/`watch`) on `pods`, `get` on `pods/log`, `get`/`list` on
-`events`, plus `create`/`get` on `apps/deployments` and on `services` —
-nothing else. The app can create Deployments and Services but can't delete,
-patch, list, or watch existing ones, and has no access to Secrets,
-ConfigMaps, RBAC objects, etc.
+`events`, `create` on `pods/portforward` (the reverse proxy tunnels through
+this — the same permission `kubectl port-forward` needs), plus `create`/`get`
+on `apps/deployments` and on `services` — nothing else. The app can create
+Deployments and Services but can't delete, patch, list, or watch existing
+ones, and has no access to Secrets, ConfigMaps, RBAC objects, etc. Note that
+`pods/portforward` is a real capability worth naming explicitly: it lets the
+backend reach any pod's ports in the namespace directly, not just
+proxy-enabled ones — the actual restriction to "your own proxy-enabled
+deployments only" is enforced in application code (`backend/src/proxy.rs`),
+not by this RBAC rule.
 
 **Other:**
 
@@ -399,8 +447,8 @@ ConfigMaps, RBAC objects, etc.
   LoadBalancer IP — there's no admission control over what gets exposed.
 - Templates (Ollama/vLLM/SGLang/JupyterLab/RStudio) are unauthenticated *at
   the app they launch* by default, unrelated to logging into Aether itself.
-  Ollama and SGLang have no auto-generated credential (see "Ownership and
-  auto-generated credentials" above) — set your own token/password via the
+  Ollama and SGLang have no auto-generated credential (see "Ownership, auto-generated
+  credentials, and the reverse proxy" above) — set your own token/password via the
   env var editor if the image supports one, otherwise it's either unauthenticated
   or gets a random value visible only in the pod's own logs. JupyterLab,
   RStudio, and vLLM get an auto-generated credential, stored **in plaintext**
@@ -435,8 +483,15 @@ login/logout, a real `user`-role account confirmed able to reach Pods/Launch
 but getting 403s from the Templates/Users write endpoints, and each
 validation rule in `backend/src/validate.rs` confirmed to actually reject
 its bad input (bad k8s name, out-of-range port, malformed quantity, bad env
-key, path-injection-shaped pod name, weak password) via curl. Known gaps, in
-case they matter for what you do next:
+key, path-injection-shaped pod name, weak password) via curl. The reverse
+proxy was verified against a real `jupyter/base-notebook` pod launched by a
+`user`-role account: no Service was created, `/proxy/<name>/` served
+JupyterLab with the token already applied (no login prompt), a second
+non-owning user got 403 while an admin could still open it, and — the part
+most likely to silently break — a real notebook cell was executed through
+the proxied WebSocket kernel connection and returned the correct output,
+confirming the upgrade-tunneling code path actually works and isn't just
+serving static pages. Known gaps, in case they matter for what you do next:
 
 - **No password reset or self-service anything.** An admin creates every
   account (Users tab) with the password they'll use; there's no "forgot
@@ -488,10 +543,20 @@ case they matter for what you do next:
   `Secret` or any encrypted store, and persist after the pod that used them
   is gone (no cleanup job) — anyone with `deployment_secrets` table access
   can read every credential ever generated, past or present.
-- **No true JupyterHub-style header injection.** There's no reverse proxy in
-  front of launched apps, so credentials are generated and displayed for
-  copy/paste, not transparently attached to your requests. See "Ownership
-  and auto-generated credentials" above for the one exception (vLLM).
+- **Only JupyterLab gets true JupyterHub-style transparent auth** (reverse
+  proxy + injected header, click "Open" and you're in). RStudio and vLLM
+  still just display a credential for copy/paste — RStudio because its
+  path-prefix support is unverified (see the vLLM/SGLang gap above for the
+  same kind of caveat), vLLM because it's meant for scripted API clients
+  where a proxied cookie-auth flow would be more friction, not less. See
+  "Ownership, auto-generated credentials, and the reverse proxy" above.
+- **The reverse proxy opens a fresh port-forward tunnel per HTTP request**,
+  not a pooled/reused connection — correctness over performance for this
+  first pass. Fine for interactive single-user use; would need pooling
+  before it'd hold up under heavier concurrent load.
+- **`pods/portforward` RBAC is namespace-wide**, not scoped to individual
+  pods — the backend's own application code is what restricts the reverse
+  proxy to a deployment's owner (or an admin), not Kubernetes RBAC itself.
 - **Dashboard is dark-mode only**, no light theme or user preference toggle.
   Colors are pulled from the project's validated dark dashboard palette
   (status/accent/surface tokens) rather than picked ad hoc — keep new UI

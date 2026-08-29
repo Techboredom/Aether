@@ -99,6 +99,7 @@ pub fn pod_to_info(pod: &Pod) -> PodInfo {
         owner,
         deployment_name,
         credential: None,
+        proxy_path: None,
     }
 }
 

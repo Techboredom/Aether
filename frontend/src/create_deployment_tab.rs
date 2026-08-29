@@ -6,6 +6,9 @@ use leptos::task::spawn_local;
 
 use crate::env_editor::{EnvVars, EnvVarsEditor};
 
+/// A successful launch's (message, proxy_path) pair.
+type LaunchResult = Result<(String, Option<String>), String>;
+
 #[component]
 pub fn CreateDeploymentTab() -> impl IntoView {
     let images: RwSignal<Vec<ImageEntry>> = RwSignal::new(Vec::new());
@@ -29,9 +32,10 @@ pub fn CreateDeploymentTab() -> impl IntoView {
     let args_text = RwSignal::new(String::new());
     let notes = RwSignal::new(None::<String>);
     let secret_env_key = RwSignal::new(None::<String>);
+    let proxy_enabled = RwSignal::new(false);
 
     let submitting = RwSignal::new(false);
-    let result: RwSignal<Option<Result<String, String>>> = RwSignal::new(None);
+    let result: RwSignal<Option<LaunchResult>> = RwSignal::new(None);
 
     spawn_local(async move {
         match Request::get("/api/images").send().await {
@@ -72,6 +76,7 @@ pub fn CreateDeploymentTab() -> impl IntoView {
         env_vars.set_from(&env);
         args_text.set(t.args.join("\n"));
         secret_env_key.set(t.secret_env_key.clone());
+        proxy_enabled.set(t.proxy_enabled);
     };
 
     let reset_to_custom = move || {
@@ -88,6 +93,7 @@ pub fn CreateDeploymentTab() -> impl IntoView {
         env_vars.set_from(&[]);
         args_text.set(String::new());
         secret_env_key.set(None);
+        proxy_enabled.set(false);
     };
 
     let on_template_change = move |ev: web_sys::Event| {
@@ -131,6 +137,7 @@ pub fn CreateDeploymentTab() -> impl IntoView {
             env: env_vars.to_pairs(),
             args,
             generate_secret_for: secret_env_key.get(),
+            enable_proxy: proxy_enabled.get(),
         };
 
         submitting.set(true);
@@ -168,6 +175,17 @@ pub fn CreateDeploymentTab() -> impl IntoView {
                                     {format!(
                                         "A random {key} will be generated automatically and shown here after launch — no need to set one yourself.",
                                     )}
+                                </div>
+                            }
+                        })
+                }}
+                {move || {
+                    proxy_enabled
+                        .get()
+                        .then(|| {
+                            view! {
+                                <div class="template-notes">
+                                    "Opens through Aether directly — no public IP, no separate login."
                                 </div>
                             }
                         })
@@ -321,7 +339,22 @@ pub fn CreateDeploymentTab() -> impl IntoView {
 
             {move || {
                 result.get().map(|res| match res {
-                    Ok(msg) => view! { <div class="success">{msg}</div> }.into_any(),
+                    Ok((msg, proxy_path)) => {
+                        view! {
+                            <div class="success">
+                                {msg}
+                                {proxy_path.map(|path| {
+                                    view! {
+                                        " "
+                                        <a class="icon-button" href=path target="_blank">
+                                            "Open"
+                                        </a>
+                                    }
+                                })}
+                            </div>
+                        }
+                            .into_any()
+                    }
                     Err(msg) => view! { <div class="error">{msg}</div> }.into_any(),
                 })
             }}
@@ -354,7 +387,7 @@ fn slugify(s: &str) -> String {
     out
 }
 
-async fn submit(req: CreateDeploymentRequest) -> Result<String, String> {
+async fn submit(req: CreateDeploymentRequest) -> LaunchResult {
     let resp = Request::post("/api/deployments")
         .json(&req)
         .map_err(|err| format!("failed to encode request: {err}"))?
@@ -375,7 +408,7 @@ async fn submit(req: CreateDeploymentRequest) -> Result<String, String> {
         if let Some(secret) = created.secret_value {
             msg.push_str(&format!(" Generated credential: {secret} (also shown on the Pods tab)."));
         }
-        Ok(msg)
+        Ok((msg, created.proxy_path))
     } else {
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
         let message = body.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");

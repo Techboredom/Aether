@@ -14,6 +14,11 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
+  # Reverse proxy for proxy-enabled templates (backend/src/proxy.rs): tunnels
+  # to the pod directly, the same mechanism `kubectl port-forward` uses.
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    verbs: ["create"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["get", "list"]

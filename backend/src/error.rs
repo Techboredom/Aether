@@ -11,6 +11,9 @@ pub enum ApiError {
     BadRequest(String),
     Unauthorized,
     Forbidden(String),
+    /// The proxied app couldn't be reached (no running pod, portforward/handshake
+    /// failure, ...) — distinct from `BadRequest` since it's not the caller's fault.
+    ProxyUnavailable(String),
 }
 
 impl From<kube::Error> for ApiError {
@@ -37,6 +40,7 @@ impl IntoResponse for ApiError {
             ApiError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "not logged in".to_string()),
             ApiError::Forbidden(message) => (StatusCode::FORBIDDEN, message),
+            ApiError::ProxyUnavailable(message) => (StatusCode::BAD_GATEWAY, message),
         };
         (status, Json(json!({ "error": message }))).into_response()
     }

@@ -630,6 +630,17 @@ tbody tr:hover {
   gap: 2px;
 }
 
+.credential .icon-button,
+.success .icon-button {
+  display: inline-block;
+  width: auto;
+  height: auto;
+  padding: 5px 10px;
+  font-size: 12px;
+  text-decoration: none;
+  align-self: flex-start;
+}
+
 .credential-key {
   font-size: 10px;
   color: var(--text-muted);

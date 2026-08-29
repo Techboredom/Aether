@@ -4,6 +4,7 @@ mod error;
 mod events;
 mod images;
 mod logs;
+mod proxy;
 mod resources;
 mod state;
 mod templates;
@@ -15,7 +16,7 @@ mod ws;
 
 use std::net::SocketAddr;
 
-use axum::routing::{get, post, put};
+use axum::routing::{any, get, post, put};
 use axum::Router;
 use clap::Parser;
 use kube::Client;
@@ -88,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/pods/{name}/logs", get(logs::get_pod_logs))
         .route("/api/pods/{name}/events", get(events::get_pod_events))
         .route("/ws", get(ws::ws_handler))
+        .route("/proxy/{deployment_name}/{*rest}", any(proxy::handler))
         .fallback_service(static_service)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
