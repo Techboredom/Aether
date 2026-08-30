@@ -27,8 +27,9 @@ Launch; only admins see Templates and Users.
 - **Launch** — creates a `Deployment` in that namespace, owned by whichever
   account launched it, and if a container port is given, also a Service
   exposing it — `LoadBalancer` (public, since there's no ingress) by
-  default, or `ClusterIP`-only for templates with no auth of their own
-  (RStudio). The form's first field is a **Template** dropdown — Ollama,
+  default, or `ClusterIP`-only for templates where Aether's own proxy is the
+  intended (and, for RStudio, only) way in (JupyterLab, RStudio). The form's
+  first field is a **Template** dropdown — Ollama,
   vLLM, SGLang (Intelligence Layer) or JupyterLab, RStudio (Interface
   Layer), or **Custom** — which pre-fills image, port, resource sizing, GPU
   defaults, and any default env vars/args for that template. Every
@@ -154,9 +155,9 @@ additionally require the `admin` role (403 otherwise).
 - `GET /ws` — WebSocket; sends a full snapshot on connect (same per-role filtering and credential enrichment as `GET /api/pods`), then `upsert`/`delete` events as pods change, filtered the same way per-connection
 - `GET /api/images` — JSON list of catalog entries from the `images` table (id, name, image, description)
 - `GET /api/templates` — JSON list of templates (any logged-in role — needed for the Launch tab's dropdown)
-- `POST /api/templates` / `PUT /api/templates/{id}` *(admin)* — create/update a template. Body is a `TemplateEntry` minus `id`: `{name, image, container_port, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, env, args, notes, secret_env_key, proxy_enabled, strip_prefix, public_service}` — only `name`/`image` are required, everything else defaults to empty/`null`/`false`/`true`. `secret_env_key`, if set, is the env var name (e.g. `JUPYTER_TOKEN`) that Launch should auto-generate instead of showing as an editable field — a proxy-enabled template doesn't need one (RStudio has none). `strip_prefix` and `public_service` only matter when `proxy_enabled` is set (see "the reverse proxy" above); `public_service = false` requires `proxy_enabled = true` (400 otherwise) — an app with no other way in would be unreachable.
+- `POST /api/templates` / `PUT /api/templates/{id}` *(admin)* — create/update a template. Body is a `TemplateEntry` minus `id`: `{name, image, container_port, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, env, args, notes, secret_env_key, proxy_enabled, strip_prefix, public_service}` — only `name`/`image` are required, everything else defaults to empty/`null`/`false`/`true`. `secret_env_key`, if set, is the env var name (e.g. `JUPYTER_TOKEN`) that Launch should auto-generate instead of showing as an editable field — a proxy-enabled template doesn't need one (RStudio has none). `strip_prefix` only matters when `proxy_enabled` is set (see "the reverse proxy" above). `public_service` is independent of `proxy_enabled` — set it to `false` either for a proxied app with no auth of its own (Aether's login becomes the only way in, e.g. RStudio), or for a plain internal-only service consumed from inside the cluster (e.g. an LLM engine other in-cluster tooling talks to directly, with no browser login to bypass and no proxy involved at all).
 - `DELETE /api/templates/{id}` *(admin)* — delete a template
-- `POST /api/deployments` — creates a `Deployment` in the watched namespace (labeled `aether.io/owner: <your username>`), and if `container_port` is set, also a Service exposing it — `LoadBalancer` (public, MetalLB-assigned external IP) if `public_service` is true (the default), `ClusterIP`-only otherwise. Body: `{name, image, replicas, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, container_port, env, args, generate_secret_for, enable_proxy, strip_prefix, public_service}` — everything except `name`/`image`/`replicas` is optional (`public_service` defaults to `true` if omitted); `env` is `[[key, value], ...]` pairs (entries with an empty value are dropped, so an image's own default behavior — e.g. an auto-generated password logged at startup — still applies unless you set one); `args` is a list of container command-line arguments (any occurrence of the literal string `{{name}}` is substituted with the deployment's own name first); `generate_secret_for`, if set to an env var name, generates a random value for it (overriding anything with that key in `env`) and stores it in `deployment_secrets`; `enable_proxy`, if `true`, requires `container_port` to be set (400 otherwise) and makes the app also reachable via `GET/POST/... /proxy/<name>/...`, with `strip_prefix` controlling how that route forwards paths (see "the reverse proxy" above); `public_service = false` requires `enable_proxy = true` (400 otherwise). Response adds `service_name`/`container_port` (both `null` if no port was given), `secret_value` (the generated value, or `null`), `proxy_path` (`"/proxy/<name>/"` if `enable_proxy` was set, else `null`), and `public_service` (echoes the request, so the frontend knows whether to mention an external IP).
+- `POST /api/deployments` — creates a `Deployment` in the watched namespace (labeled `aether.io/owner: <your username>`), and if `container_port` is set, also a Service exposing it — `LoadBalancer` (public, MetalLB-assigned external IP) if `public_service` is true (the default), `ClusterIP`-only otherwise. Body: `{name, image, replicas, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, container_port, env, args, generate_secret_for, enable_proxy, strip_prefix, public_service}` — everything except `name`/`image`/`replicas` is optional (`public_service` defaults to `true` if omitted); `env` is `[[key, value], ...]` pairs (entries with an empty value are dropped, so an image's own default behavior — e.g. an auto-generated password logged at startup — still applies unless you set one); `args` is a list of container command-line arguments (any occurrence of the literal string `{{name}}` is substituted with the deployment's own name first); `generate_secret_for`, if set to an env var name, generates a random value for it (overriding anything with that key in `env`) and stores it in `deployment_secrets`; `enable_proxy`, if `true`, requires `container_port` to be set (400 otherwise) and makes the app also reachable via `GET/POST/... /proxy/<name>/...`, with `strip_prefix` controlling how that route forwards paths (see "the reverse proxy" above); `public_service`, independent of `enable_proxy`, controls whether the Service is a public `LoadBalancer` or `ClusterIP`-only. Response adds `service_name`/`container_port` (both `null` if no port was given), `secret_value` (the generated value, or `null`), `proxy_path` (`"/proxy/<name>/"` if `enable_proxy` was set, else `null`), and `public_service` (echoes the request, so the frontend knows whether to mention an external IP).
 - `ANY /proxy/{deployment_name}`, `ANY /proxy/{deployment_name}/`, `ANY /proxy/{deployment_name}/{*rest}` — reverse-proxies into a proxy-enabled deployment's pod (`backend/src/proxy.rs`), injecting its generated credential (if any) as the appropriate auth header so there's no login prompt. The first two (bare path / trailing slash, no further segment) are what every "Open" link actually points at; the wildcard one handles everything else the app itself requests once loaded. 403 if you're not that deployment's owner (or an admin); 400 if the deployment isn't proxy-enabled; 502 if the connection to its pod fails or times out (5s). Handles WebSocket upgrades transparently (needed for JupyterLab's kernel connections). See "Ownership, auto-generated credentials, and the reverse proxy" below.
 - `GET /api/pods/{name}/logs?container=&tail_lines=&previous=` — plain-text container logs (`container` defaults to the pod's only container if it has one; `tail_lines` defaults to 500; `previous=true` gets the last terminated instance's logs, for a crashed container)
 - `GET /api/pods/{name}/events` — JSON list of Kubernetes Events involving that pod (`type_`, `reason`, `message`, `count`, `last_seen`), most recent first — note the apiserver's default Event TTL is short (commonly ~1h), so older pods often have none left
@@ -220,6 +221,18 @@ delete them from the Templates tab like any other row. JupyterLab
 `secret_env_key`; Ollama, SGLang, and RStudio aren't (Ollama and SGLang have
 no auth mechanism at all; RStudio runs with its own auth fully disabled —
 see below). Both JupyterLab and RStudio are seeded `proxy_enabled`.
+
+`public_service` is a separate, admin-only toggle available on every
+template — including Ollama/vLLM/SGLang, which have no `proxy_enabled` at
+all. Unchecking it in the Templates tab (or setting it on a per-launch
+basis via the API) makes future launches of that template get a
+`ClusterIP`-only Service instead of a public `LoadBalancer`: still fully
+reachable from anywhere else inside the cluster (e.g. an in-cluster coding
+tool calling an LLM engine's API directly), just not from outside it. This
+is independent of the reverse proxy — it doesn't require (or imply) auth of
+any kind, it's purely about network exposure. Ollama/vLLM/SGLang default to
+`public_service = true` (external), matching their behavior before this
+toggle existed; flip it per template as needed.
 
 ## Ownership, auto-generated credentials, and the reverse proxy
 
@@ -303,7 +316,12 @@ placeholder substituted with the deployment's own name at launch time (any
 template's `args` can use it). Kubernetes' `args` field *replaces* a
 container's default command rather than appending to it, which is why the
 start script has to be named explicitly — leaving it out makes the
-container try (and fail) to `exec` the flag itself as a program.
+container try (and fail) to `exec` the flag itself as a program. Its
+template also sets `public_service = false` — the token-header injection
+above is the only auth the proxy adds, so, same as RStudio below, the pod
+gets a `ClusterIP`-only Service rather than a public `LoadBalancer`;
+otherwise anyone who obtained a raw pod IP could skip Aether's proxy (and
+its ownership check) and reach Jupyter directly with no token at all.
 
 **RStudio runs with its own authentication fully disabled** (`env:
 [["DISABLE_AUTH", "true"]]`) and relies entirely on Aether's login plus the
@@ -368,7 +386,7 @@ workflow) and have Docker available.
 
 ## Deploying to Kubernetes
 
-Manifests live in `k8s/` and deploy into the `ollama` namespace (the app
+Manifests live in `k8s/` and deploy into the `aether` namespace (the app
 always watches its own namespace, via the pod's `metadata.namespace`, so
 watched namespace = deployed namespace). They're pinned to `amd64` nodes via
 `nodeSelector`, since the image is amd64-only.
@@ -380,14 +398,14 @@ watched namespace = deployed namespace). They're pinned to `amd64` nodes via
    kubectl create secret docker-registry regcred \
      --docker-server=ctr.int.example.com:8443 \
      --docker-username=<user> --docker-password=<password> \
-     -n ollama
+     -n aether
    ```
 
 2. **Database secret** — the app needs a Postgres connection string for the
    image catalog:
 
    ```
-   kubectl create secret generic aether-db -n ollama \
+   kubectl create secret generic aether-db -n aether \
      --from-literal=DATABASE_URL='postgres://user:pass@host:5432/dbname'
    ```
 
@@ -399,7 +417,7 @@ watched namespace = deployed namespace). They're pinned to `amd64` nodes via
 
    This creates:
    - `ServiceAccount` + `Role`/`RoleBinding` (`aether`) — scoped to the
-     `ollama` namespace only, no cluster-wide permissions: `get`/`list`/`watch`
+     `aether` namespace only, no cluster-wide permissions: `get`/`list`/`watch`
      on `pods` plus `get` on `pods/log` and `get`/`list` on `events` (Pods tab
      and its detail panel), and `create`/`get` on `apps/deployments` and on
      `services` (Launch tab — the Service is how a launched app becomes
@@ -409,20 +427,19 @@ watched namespace = deployed namespace). They're pinned to `amd64` nodes via
      probes on `/api/pods`, hardened `securityContext` (non-root, read-only
      root filesystem, all capabilities dropped).
    - `Service` (`aether`) — `type: LoadBalancer`, port `3000`, gets an
-     external IP from the cluster's MetalLB pool (`192.0.2.0/24`), same
-     pattern as the existing `ollama01` service.
+     external IP from the cluster's MetalLB pool (`192.0.2.0/24`).
 
 4. **Find the external IP and open it:**
 
    ```
-   kubectl get svc -n ollama aether
+   kubectl get svc -n aether aether
    ```
 
    Then browse to `http://<external-ip>:3000`.
 
 ### Watching a different namespace
 
-To watch a namespace other than `ollama`, either:
+To watch a namespace other than `aether`, either:
 
 - Edit the `namespace:` field in `k8s/kustomization.yaml` (and re-run
   `kubectl create secret docker-registry regcred ...` in that namespace too), or

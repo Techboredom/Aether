@@ -4,7 +4,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: aether
-  namespace: ollama
+  namespace: aether
 rules:
   # Pods tab: read-only, to watch and display the running pods.
   - apiGroups: [""]
@@ -32,11 +32,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: aether
-  namespace: ollama
+  namespace: aether
 subjects:
   - kind: ServiceAccount
     name: aether
-    namespace: ollama
+    namespace: aether
 roleRef:
   kind: Role
   name: aether

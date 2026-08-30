@@ -386,11 +386,10 @@ pub fn TemplatesTab() -> impl IntoView {
                 <label class="checkbox">
                     <input
                         type="checkbox"
-                        disabled=move || !proxy_enabled.get()
                         prop:checked=move || public_service.get()
                         on:change=move |ev| public_service.set(event_target_checked(&ev))
                     />
-                    "Public LoadBalancer Service (uncheck for apps with no auth of their own — Aether's login becomes the only way in)"
+                    "Public LoadBalancer Service (uncheck to make it internal — reachable only from inside the cluster, e.g. by other tooling pods, or via Aether's proxy for apps with no auth of their own)"
                 </label>
 
                 <div class="form-actions">

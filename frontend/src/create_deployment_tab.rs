@@ -188,16 +188,22 @@ pub fn CreateDeploymentTab() -> impl IntoView {
                         })
                 }}
                 {move || {
-                    proxy_enabled
-                        .get()
-                        .then(|| {
-                            let text = if public_service.get() {
-                                "Also opens through Aether directly — no separate login needed via that route."
-                            } else {
-                                "Opens through Aether only — no public IP, no login of its own; Aether's own login is the only way in."
-                            };
-                            view! { <div class="template-notes">{text}</div> }
-                        })
+                    let text = if proxy_enabled.get() {
+                        if public_service.get() {
+                            Some("Also opens through Aether directly — no separate login needed via that route.")
+                        } else {
+                            Some(
+                                "Opens through Aether only — no public IP, no login of its own; Aether's own login is the only way in.",
+                            )
+                        }
+                    } else if !public_service.get() {
+                        Some(
+                            "Internal only — no public IP. Reachable only from inside the cluster (e.g. other tooling pods), not from outside it.",
+                        )
+                    } else {
+                        None
+                    };
+                    text.map(|text| view! { <div class="template-notes">{text}</div> })
                 }}
 
                 <label>
@@ -414,9 +420,13 @@ async fn submit(req: CreateDeploymentRequest) -> LaunchResult {
                     " Exposed via Service \"{service}\" on port {port} — check `kubectl get svc -n {}` for its external IP.",
                     created.namespace
                 ));
-            } else {
+            } else if created.proxy_path.is_some() {
                 msg.push_str(&format!(
                     " Service \"{service}\" has no public IP — reachable only through Aether's own login."
+                ));
+            } else {
+                msg.push_str(&format!(
+                    " Service \"{service}\" has no public IP — reachable only from inside the cluster."
                 ));
             }
         }
