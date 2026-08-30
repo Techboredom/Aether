@@ -5,6 +5,7 @@ mod events;
 mod images;
 mod logs;
 mod proxy;
+mod quota;
 mod resources;
 mod state;
 mod templates;
@@ -95,6 +96,10 @@ async fn main() -> anyhow::Result<()> {
             get(deployments::get_deployment).put(deployments::update_deployment).delete(deployments::delete_deployment),
         )
         .route("/api/launches", get(deployments::list_launches))
+        .route("/api/quota/me", get(quota::my_quota))
+        .route("/api/quota/settings", get(quota::get_settings).put(quota::update_settings))
+        .route("/api/quota/users", get(quota::list_user_quotas))
+        .route("/api/quota/users/{id}", put(quota::set_user_quota).delete(quota::clear_user_quota))
         .route("/api/pods/{name}/logs", get(logs::get_pod_logs))
         .route("/api/pods/{name}/events", get(events::get_pod_events))
         .route("/ws", get(ws::ws_handler))

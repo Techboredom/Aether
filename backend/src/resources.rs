@@ -158,7 +158,7 @@ fn is_accelerator_resource(name: &str) -> bool {
 }
 
 /// Parses a CPU `Quantity` (e.g. "500m", "2", "1500u") into millicores.
-fn parse_cpu_millicores(q: &Quantity) -> Option<i64> {
+pub fn parse_cpu_millicores(q: &Quantity) -> Option<i64> {
     let s = q.0.trim();
     if let Some(stripped) = s.strip_suffix('m') {
         stripped.parse::<f64>().ok().map(|v| v.round() as i64)
@@ -172,7 +172,7 @@ fn parse_cpu_millicores(q: &Quantity) -> Option<i64> {
 }
 
 /// Parses a memory `Quantity` (e.g. "512Mi", "1Gi", "128974848") into bytes.
-fn parse_memory_bytes(q: &Quantity) -> Option<i64> {
+pub fn parse_memory_bytes(q: &Quantity) -> Option<i64> {
     let s = q.0.trim();
     const BINARY_SUFFIXES: &[(&str, f64)] = &[
         ("Ki", 1024.0),
@@ -204,7 +204,7 @@ fn parse_memory_bytes(q: &Quantity) -> Option<i64> {
 }
 
 /// Parses an integer-ish `Quantity` used for accelerator counts (e.g. "1", "2").
-fn parse_count(q: &Quantity) -> Option<i64> {
+pub fn parse_count(q: &Quantity) -> Option<i64> {
     let s = q.0.trim();
     s.parse::<i64>().ok().or_else(|| s.parse::<f64>().ok().map(|v| v.round() as i64))
 }

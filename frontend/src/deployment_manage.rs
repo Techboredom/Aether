@@ -1,10 +1,11 @@
-use common::{DeploymentDetail, UpdateDeploymentRequest};
+use common::{DeploymentDetail, MyQuota, UpdateDeploymentRequest};
 use gloo_net::http::Request;
 use leptos::prelude::*;
 use leptos::tachys::dom::event_target_value;
 use leptos::task::spawn_local;
 
 use crate::env_editor::{EnvVars, EnvVarsEditor};
+use crate::format::quota_summary;
 
 /// Scale/edit/delete controls for a Deployment, shown in the pod detail panel
 /// for any pod that has one (`PodInfo::deployment_name`). The backend is the
@@ -28,6 +29,17 @@ pub fn ManageDeploymentSection(deployment_name: String, selected: RwSignal<Optio
     let save_result: RwSignal<Option<Result<String, String>>> = RwSignal::new(None);
     let deleting = RwSignal::new(false);
     let delete_error = RwSignal::new(None::<String>);
+
+    let my_quota: RwSignal<Option<MyQuota>> = RwSignal::new(None);
+    let expose_requests = move || my_quota.get().map(|q| q.expose_resource_requests).unwrap_or(true);
+
+    spawn_local(async move {
+        if let Ok(resp) = Request::get("/api/quota/me").send().await
+            && resp.ok()
+                && let Ok(quota) = resp.json::<MyQuota>().await {
+                    my_quota.set(Some(quota));
+                }
+    });
 
     {
         let name = deployment_name.clone();
@@ -77,9 +89,9 @@ pub fn ManageDeploymentSection(deployment_name: String, selected: RwSignal<Optio
                         }
                         let req = UpdateDeploymentRequest {
                             replicas: replicas.get(),
-                            cpu_request: non_empty(cpu_request.get()),
+                            cpu_request: if expose_requests() { non_empty(cpu_request.get()) } else { None },
                             cpu_limit: non_empty(cpu_limit.get()),
-                            memory_request: non_empty(memory_request.get()),
+                            memory_request: if expose_requests() { non_empty(memory_request.get()) } else { None },
                             memory_limit: non_empty(memory_limit.get()),
                             env: env_vars.to_pairs(),
                         };
@@ -141,17 +153,23 @@ pub fn ManageDeploymentSection(deployment_name: String, selected: RwSignal<Optio
                                 />
                             </label>
 
+                            {move || {
+                                my_quota.get().map(|q| view! { <p class="hint">{quota_summary(&q)}</p> })
+                            }}
+
                             <fieldset>
                                 <legend>"CPU"</legend>
-                                <label>
-                                    "Request"
-                                    <input
-                                        type="text"
-                                        placeholder="e.g. 250m"
-                                        prop:value=move || cpu_request.get()
-                                        on:input=move |ev| cpu_request.set(event_target_value(&ev))
-                                    />
-                                </label>
+                                <Show when=expose_requests>
+                                    <label>
+                                        "Request"
+                                        <input
+                                            type="text"
+                                            placeholder="e.g. 250m"
+                                            prop:value=move || cpu_request.get()
+                                            on:input=move |ev| cpu_request.set(event_target_value(&ev))
+                                        />
+                                    </label>
+                                </Show>
                                 <label>
                                     "Limit"
                                     <input
@@ -165,15 +183,17 @@ pub fn ManageDeploymentSection(deployment_name: String, selected: RwSignal<Optio
 
                             <fieldset>
                                 <legend>"Memory"</legend>
-                                <label>
-                                    "Request"
-                                    <input
-                                        type="text"
-                                        placeholder="e.g. 256Mi"
-                                        prop:value=move || memory_request.get()
-                                        on:input=move |ev| memory_request.set(event_target_value(&ev))
-                                    />
-                                </label>
+                                <Show when=expose_requests>
+                                    <label>
+                                        "Request"
+                                        <input
+                                            type="text"
+                                            placeholder="e.g. 256Mi"
+                                            prop:value=move || memory_request.get()
+                                            on:input=move |ev| memory_request.set(event_target_value(&ev))
+                                        />
+                                    </label>
+                                </Show>
                                 <label>
                                     "Limit"
                                     <input

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use common::ContainerStatusInfo;
+use common::{ContainerStatusInfo, MyQuota};
 
 pub fn millicores(m: Option<i64>) -> String {
     match m {
@@ -63,6 +63,28 @@ pub fn accelerator_summary(accelerator_type: &str, count: Option<i64>) -> String
         return "—".to_string();
     }
     format!("{accelerator_type} ×{}", count.unwrap_or(1))
+}
+
+/// Renders a "used / limit" summary line for the Launch tab and the Pods
+/// tab's manage panel, e.g. "CPU limit: 1.5 / 4 cores · Memory limit: 2Gi /
+/// 16Gi · GPUs: 0 / 2". A dimension with no configured limit is shown as
+/// "used / unlimited".
+pub fn quota_summary(quota: &MyQuota) -> String {
+    let cpu_used = quota.used_cpu_millicores as f64 / 1000.0;
+    let cpu = match &quota.limits.cpu_limit {
+        Some(limit) => format!("{cpu_used:.2} / {limit} cores"),
+        None => format!("{cpu_used:.2} cores / unlimited"),
+    };
+    let mem_used = bytes(Some(quota.used_memory_bytes));
+    let mem = match &quota.limits.memory_limit {
+        Some(limit) => format!("{mem_used} / {limit}"),
+        None => format!("{mem_used} / unlimited"),
+    };
+    let gpu = match quota.limits.gpu_limit {
+        Some(limit) => format!("{} / {limit}", quota.used_gpu_count),
+        None => format!("{} / unlimited", quota.used_gpu_count),
+    };
+    format!("CPU limit: {cpu} · Memory limit: {mem} · GPUs: {gpu}")
 }
 
 /// Renders a kubectl-style compact age string (e.g. "3d", "5h12m", "45s") from an

@@ -16,7 +16,8 @@ use sqlx::FromRow;
 
 use crate::auth::{generate_token, CurrentUser};
 use crate::error::ApiError;
-use crate::resources::OWNER_LABEL;
+use crate::quota;
+use crate::resources::{parse_count, parse_cpu_millicores, parse_memory_bytes, OWNER_LABEL};
 use crate::state::AppState;
 use crate::validate;
 
@@ -72,6 +73,15 @@ pub async fn create_deployment(
     if req.enable_proxy && req.container_port.is_none() {
         return Err(ApiError::BadRequest("enable_proxy requires container_port".into()));
     }
+
+    let replicas = i64::from(req.replicas);
+    let additional_cpu = req.cpu_limit.as_deref().and_then(|v| parse_cpu_millicores(&Quantity(v.to_string()))).unwrap_or(0) * replicas;
+    let additional_memory = req.memory_limit.as_deref().and_then(|v| parse_memory_bytes(&Quantity(v.to_string()))).unwrap_or(0) * replicas;
+    let additional_gpu = match (&req.accelerator_type, req.accelerator_count) {
+        (Some(accel_type), Some(count)) if !accel_type.trim().is_empty() && count > 0 => count * replicas,
+        _ => 0,
+    };
+    quota::check_quota(&state, &user, None, additional_cpu, additional_memory, additional_gpu).await?;
 
     let mut requests = BTreeMap::new();
     let mut limits = BTreeMap::new();
@@ -451,6 +461,28 @@ pub async fn update_deployment(
     let deployments: Api<Deployment> = Api::namespaced(state.client.clone(), &state.namespace);
     let mut deployment = deployments.get(&name).await?;
     check_owner(&deployment, &user)?;
+
+    // Accelerators aren't part of UpdateDeploymentRequest (not editable
+    // here), but they're preserved from the deployment's existing
+    // resources below and still count toward the GPU quota - read them
+    // before mutation to include in the check.
+    let per_replica_gpu: i64 = deployment
+        .spec
+        .as_ref()
+        .and_then(|s| s.template.spec.as_ref())
+        .and_then(|s| s.containers.first())
+        .and_then(|c| c.resources.as_ref())
+        .and_then(|r| r.limits.as_ref())
+        .map(|limits| {
+            limits.iter().filter(|(k, _)| k.as_str() != "cpu" && k.as_str() != "memory").filter_map(|(_, q)| parse_count(q)).sum()
+        })
+        .unwrap_or(0);
+
+    let replicas = i64::from(req.replicas);
+    let additional_cpu = req.cpu_limit.as_deref().and_then(|v| parse_cpu_millicores(&Quantity(v.to_string()))).unwrap_or(0) * replicas;
+    let additional_memory = req.memory_limit.as_deref().and_then(|v| parse_memory_bytes(&Quantity(v.to_string()))).unwrap_or(0) * replicas;
+    let additional_gpu = per_replica_gpu * replicas;
+    quota::check_quota(&state, &user, Some(&name), additional_cpu, additional_memory, additional_gpu).await?;
 
     // Never regenerate an existing secret on edit - that would silently
     // invalidate a value a client may already be using. Just carry the

@@ -363,3 +363,55 @@ pub struct LaunchLogEntry {
     pub env: Vec<(String, String)>,
     pub args: Vec<String>,
 }
+
+/// A CPU/memory/GPU limit triple, `None` meaning unlimited for that
+/// dimension. Shared shape for both the global default and a per-user
+/// override — see `common::MyQuota`/`UserQuotaEntry`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct QuotaLimits {
+    pub cpu_limit: Option<String>,
+    pub memory_limit: Option<String>,
+    pub gpu_limit: Option<i32>,
+}
+
+/// The cluster-wide default quota (`GET`/`PUT /api/quota/settings`,
+/// admin-only to write). Applies to any user with no override row of their
+/// own in `user_quotas`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct QuotaSettings {
+    #[serde(flatten)]
+    pub limits: QuotaLimits,
+    /// Whether the Launch tab and the Pods tab's manage panel show
+    /// separate CPU/memory *request* fields at all, independent of the
+    /// quota limits themselves. When `false`, only limits are shown/sent,
+    /// and Kubernetes defaults a container's request to match its limit.
+    pub expose_resource_requests: bool,
+}
+
+/// Returned by `GET /api/quota/me` — the caller's own effective quota,
+/// current usage, and whether request fields should be shown at all.
+/// Backs the Launch tab and the Pods tab's manage panel.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MyQuota {
+    /// The effective limits: the caller's `user_quotas` override if they
+    /// have one, otherwise the global `quota_settings` default. Always
+    /// unlimited (all `None`) for an admin, who is exempt from enforcement.
+    pub limits: QuotaLimits,
+    pub is_override: bool,
+    pub expose_resource_requests: bool,
+    pub used_cpu_millicores: i64,
+    pub used_memory_bytes: i64,
+    pub used_gpu_count: i64,
+}
+
+/// One row of the Quotas admin tab's per-user table (`GET /api/quota/users`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UserQuotaEntry {
+    pub user_id: i32,
+    pub username: String,
+    /// `None` if this user has no override and is bound by the global default.
+    pub quota_override: Option<QuotaLimits>,
+    pub used_cpu_millicores: i64,
+    pub used_memory_bytes: i64,
+    pub used_gpu_count: i64,
+}
