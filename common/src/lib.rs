@@ -229,3 +229,18 @@ pub struct CreateUserRequest {
     pub password: String,
     pub role: Role,
 }
+
+/// Submitted by the Users admin tab to reset another account's password.
+/// Requires no proof of the old one — the admin role is the authorization.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ResetPasswordRequest {
+    pub password: String,
+}
+
+/// Submitted by the logged-in user themselves to change their own password.
+/// Requires `current_password` to match, unlike an admin's reset.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
+}

@@ -1,3 +1,4 @@
+mod account;
 mod create_deployment_tab;
 mod env_editor;
 mod format;
@@ -8,6 +9,7 @@ mod templates_tab;
 mod users_tab;
 mod ws;
 
+use account::ChangePasswordPanel;
 use common::{Role, UserInfo};
 use create_deployment_tab::CreateDeploymentTab;
 use gloo_net::http::Request;
@@ -64,6 +66,7 @@ fn AppShell(user: UserInfo, current_user: RwSignal<Option<UserInfo>>) -> impl In
     let tab = RwSignal::new(Tab::Pods);
     let is_admin = user.role == Role::Admin;
     let username = user.username.clone();
+    let show_change_password = RwSignal::new(false);
 
     let logout = move |_| {
         spawn_local(async move {
@@ -110,11 +113,18 @@ fn AppShell(user: UserInfo, current_user: RwSignal<Option<UserInfo>>) -> impl In
                 </nav>
                 <div class="user-info">
                     <span class="username">{username}</span>
+                    <button class="icon-button" on:click=move |_| show_change_password.set(true)>
+                        "Change password"
+                    </button>
                     <button class="icon-button" on:click=logout>
                         "Log out"
                     </button>
                 </div>
             </header>
+
+            <Show when=move || show_change_password.get()>
+                <ChangePasswordPanel open=show_change_password />
+            </Show>
 
             <div class:hidden=move || tab.get() != Tab::Pods>
                 <PodsTab is_admin=is_admin />

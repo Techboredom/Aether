@@ -1,4 +1,4 @@
-use common::{CreateUserRequest, Role, UserInfo};
+use common::{CreateUserRequest, ResetPasswordRequest, Role, UserInfo};
 use gloo_net::http::Request;
 use leptos::prelude::*;
 use leptos::tachys::dom::event_target_value;
@@ -15,6 +15,11 @@ pub fn UsersTab() -> impl IntoView {
 
     let saving = RwSignal::new(false);
     let form_result: RwSignal<Option<Result<String, String>>> = RwSignal::new(None);
+
+    let reset_target: RwSignal<Option<(i32, String)>> = RwSignal::new(None);
+    let reset_password_value = RwSignal::new(String::new());
+    let reset_saving = RwSignal::new(false);
+    let reset_result: RwSignal<Option<Result<String, String>>> = RwSignal::new(None);
 
     let refresh = move || {
         spawn_local(async move {
@@ -104,6 +109,17 @@ pub fn UsersTab() -> impl IntoView {
                                         <td>{u.username.clone()}</td>
                                         <td>{role_label}</td>
                                         <td class="table-actions">
+                                            <button
+                                                type="button"
+                                                class="icon-button"
+                                                on:click=move |_| {
+                                                    reset_target.set(Some((id, u.username.clone())));
+                                                    reset_password_value.set(String::new());
+                                                    reset_result.set(None);
+                                                }
+                                            >
+                                                "Reset password"
+                                            </button>
                                             <button type="button" class="icon-button" on:click=move |_| delete_user(id)>
                                                 "Delete"
                                             </button>
@@ -118,6 +134,62 @@ pub fn UsersTab() -> impl IntoView {
                     <p class="empty">"No users yet."</p>
                 </Show>
             </div>
+
+            {move || {
+                reset_target
+                    .get()
+                    .map(|(id, target_username)| {
+                        let on_reset_submit = move |ev: web_sys::SubmitEvent| {
+                            ev.prevent_default();
+                            if reset_saving.get() {
+                                return;
+                            }
+                            let password = reset_password_value.get();
+                            reset_saving.set(true);
+                            reset_result.set(None);
+                            spawn_local(async move {
+                                let outcome = reset_password(id, password).await;
+                                reset_saving.set(false);
+                                match outcome {
+                                    Ok(msg) => {
+                                        reset_result.set(Some(Ok(msg)));
+                                        reset_target.set(None);
+                                    }
+                                    Err(err) => reset_result.set(Some(Err(err))),
+                                }
+                            });
+                        };
+                        view! {
+                            <h3 class="section-heading">{format!("Reset password for \"{target_username}\"")}</h3>
+                            <form class="deploy-form" on:submit=on_reset_submit>
+                                <label>
+                                    "New password"
+                                    <input
+                                        type="password"
+                                        required=true
+                                        minlength="8"
+                                        prop:value=move || reset_password_value.get()
+                                        on:input=move |ev| reset_password_value.set(event_target_value(&ev))
+                                    />
+                                </label>
+                                <div class="form-actions">
+                                    <button type="submit" disabled=move || reset_saving.get()>
+                                        {move || if reset_saving.get() { "Saving…" } else { "Set password" }}
+                                    </button>
+                                    <button type="button" class="secondary-button" on:click=move |_| reset_target.set(None)>
+                                        "Cancel"
+                                    </button>
+                                </div>
+                            </form>
+                        }
+                    })
+            }}
+            {move || {
+                reset_result.get().map(|res| match res {
+                    Ok(msg) => view! { <div class="success">{msg}</div> }.into_any(),
+                    Err(msg) => view! { <div class="error">{msg}</div> }.into_any(),
+                })
+            }}
 
             <h3 class="section-heading">"New user"</h3>
             <form class="deploy-form" on:submit=on_submit>
@@ -161,6 +233,23 @@ pub fn UsersTab() -> impl IntoView {
                 })
             }}
         </div>
+    }
+}
+
+async fn reset_password(id: i32, password: String) -> Result<String, String> {
+    let resp = Request::put(&format!("/api/users/{id}/password"))
+        .json(&ResetPasswordRequest { password })
+        .map_err(|err| format!("failed to encode request: {err}"))?
+        .send()
+        .await
+        .map_err(|err| format!("request failed: {err}"))?;
+
+    if resp.ok() {
+        Ok("Password reset — that account's existing sessions have been logged out.".to_string())
+    } else {
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        let message = body.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");
+        Err(format!("Failed to reset password: {message}"))
     }
 }
 

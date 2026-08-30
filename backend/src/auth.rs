@@ -4,7 +4,7 @@ use axum::extract::{FromRequestParts, State};
 use axum::http::request::Parts;
 use axum::Json;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
-use common::{LoginRequest, Role, UserInfo};
+use common::{ChangePasswordRequest, LoginRequest, Role, UserInfo};
 use rand::distr::Alphanumeric;
 use rand::RngExt;
 use sqlx::FromRow;
@@ -12,6 +12,7 @@ use time::Duration;
 
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::validate;
 
 pub const SESSION_COOKIE: &str = "aether_session";
 const SESSION_LIFETIME_DAYS: i64 = 7;
@@ -143,4 +144,33 @@ pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> Result<Coo
 
 pub async fn me(user: CurrentUser) -> Json<UserInfo> {
     Json(UserInfo { id: user.id, username: user.username, role: user.role })
+}
+
+/// Lets a logged-in user change their own password, proving they know the
+/// current one first (unlike an admin's reset). Invalidates every other
+/// session for the account, but leaves the one making this request logged in.
+pub async fn change_password(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Json(req): Json<ChangePasswordRequest>,
+) -> Result<(), ApiError> {
+    let current_hash: String =
+        sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1").bind(user.id).fetch_one(&state.pg).await?;
+    if !verify_password(&current_hash, &req.current_password) {
+        return Err(ApiError::BadRequest("current password is incorrect".to_string()));
+    }
+    validate::password(&req.new_password)?;
+
+    let new_hash = hash_password(&req.new_password)?;
+    sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2").bind(&new_hash).bind(user.id).execute(&state.pg).await?;
+
+    if let Some(token) = jar.get(SESSION_COOKIE).map(|c| c.value().to_string()) {
+        sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND token != $2")
+            .bind(user.id)
+            .bind(&token)
+            .execute(&state.pg)
+            .await?;
+    }
+    Ok(())
 }
