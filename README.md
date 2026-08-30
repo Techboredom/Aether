@@ -1,13 +1,16 @@
 # Aether
 
-A dashboard for a Kubernetes namespace, behind a login, with up to five tabs
-depending on your role. It's the web-interface slice of the broader platform
-described in `SPEC.md` — the Intelligence Layer (LLM engines) and Interface
-Layer (IDEs) as launchable workloads — scoped down to what's actually
-buildable today: this cluster has no ingress controller, so there's no
-Gateway layer, and a StorageClass is only just being added (see "Status &
-known limitations" below) — Aether's own Postgres is wired up to use it
-(CloudNativePG, see "Deploying to Kubernetes" below) but isn't live yet.
+A web app for managing compute environments and AI engines on a Kubernetes
+namespace — launch JupyterLab/RStudio environments or LLM inference engines
+(Ollama, vLLM, SGLang) with a few clicks, behind a login, with up to five
+tabs depending on your role. It's the web-interface slice of the broader
+platform described in `SPEC.md` — the Intelligence Layer (LLM engines) and
+Interface Layer (IDEs) as launchable workloads — scoped down to what's
+actually buildable today: this cluster has no ingress controller, so
+there's no Gateway layer, and a StorageClass is only just being added (see
+"Status & known limitations" below) — Aether's own Postgres is wired up to
+use it (CloudNativePG, see "Deploying to Kubernetes" below) but isn't live
+yet.
 
 There are two account roles: **admin** and **user**. Both can use Pods and
 Launch; only admins see Templates and Users.
