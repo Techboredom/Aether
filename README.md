@@ -90,8 +90,10 @@ frontend/src/login.rs      Login page
 frontend/src/pods_tab.rs   Pods tab + detail panel
 frontend/src/create_deployment_tab.rs   Launch tab (template dropdown + form)
 frontend/src/templates_tab.rs   Templates admin tab (CRUD)
+frontend/src/images_tab.rs      Images admin tab (CRUD, backs "Custom" mode on Launch)
 frontend/src/users_tab.rs       Users admin tab (CRUD)
 frontend/src/env_editor.rs      Shared add/remove env-var-row widget (Launch + Templates)
+frontend/src/theme.rs           Light/dark theme toggle (data-theme attribute + localStorage)
 Dockerfile                 Multi-stage build: compiles both crates, ships a distroless image
 .forgejo/                  Forgejo Actions workflow that builds and pushes the image, then bumps the deploy repo
 SPEC.md                    The broader platform vision this app is a slice of
@@ -181,8 +183,9 @@ additionally require the `admin` role (403 otherwise).
 
 The `images` table (schema in `backend/migrations/0001_create_images.sql`,
 applied automatically on startup via `sqlx::migrate!`) backs the image
-catalog used by "Custom" mode on the Launch tab. There's no admin UI for it
-yet (unlike templates, below) — add entries with plain SQL:
+catalog used by "Custom" mode on the Launch tab, managed from the **Images**
+admin tab — a full CRUD UI for it, same pattern as Templates below. Its
+schema, for reference or scripting bulk data:
 
 ```sql
 CREATE TABLE images (
@@ -734,7 +737,14 @@ Activity tab's login/launch history was verified the same way: two real
 accounts confirmed each only sees their own rows while an admin sees both,
 and a launched deployment's `generate_secret_for` value confirmed redacted
 to `"<generated>"` in `launch_log` rather than storing the real credential.
-Known gaps, in case they matter for what you do next:
+The Images admin tab was verified the same way as Templates: full CRUD via
+curl (including a `user`-role account confirmed to read the list but get
+403 on create), plus a Puppeteer pass creating an entry through the actual
+form. The theme toggle was confirmed via Puppeteer: default is dark,
+toggling flips `data-theme` and the rendered background color to the
+validated light-mode step, the choice persists in `localStorage` across a
+reload, and both states were screenshotted to check for layout/contrast
+issues. Known gaps, in case they matter for what you do next:
 
 - **Still no "forgot password" self-service flow** — that requires emailing
   a reset link, which this app has no mechanism for (no SMTP config, no
@@ -771,10 +781,7 @@ Known gaps, in case they matter for what you do next:
   installed and a real StorageClass named in its `storageClassName` field
   (currently `REPLACE_ME`); both are in progress. See Aether-Deploy's
   README, "Postgres (CloudNativePG)".
-- **No admin UI for the image catalog** (only for templates) — entries are
-  added with raw SQL (see "Image and template catalogs" above). Fine for a
-  handful of images, less so at scale.
-- **No confirmation on template edits**, only on delete — saving over an
+- **No confirmation on template or image edits**, only on delete — saving over an
   existing template's fields is immediate.
 - **Single namespace only**, fixed at deploy time via the pod's own
   namespace. No in-app namespace switcher; watching multiple namespaces
@@ -826,11 +833,16 @@ Known gaps, in case they matter for what you do next:
   well-contained change (only *how* a byte stream to the pod is obtained
   changed, not what's done with it), but that swap itself hasn't been
   exercised with a real Aether instance actually running in-cluster yet.
-- **Dashboard is dark-mode only**, no light theme or user preference toggle.
-  Colors are pulled from the project's validated dark dashboard palette
-  (status/accent/surface tokens) rather than picked ad hoc — keep new UI
-  work on those tokens (`frontend/style.css` custom properties) rather than
-  introducing new hex values.
+- **Light theme covers chart-chrome/ink tokens only** — the header's "Light
+  theme"/"Dark theme" toggle (persisted in `localStorage`, defaulting to
+  dark) swaps `--page`/`--surface`/`--surface-raised`/`--border`/
+  `--border-strong`/`--text-primary`/`--text-secondary`/`--accent` to their
+  validated light-mode steps via `:root[data-theme="light"]` in
+  `frontend/style.css`. `--text-muted`, `--accent-ink`, and the status
+  palette are intentionally identical in both modes (per the design
+  system), so they're inherited rather than overridden. Keep new UI work on
+  these custom properties rather than introducing new hex values, so it
+  themes correctly for free.
 - **Cross-compiling `linux/amd64` locally from an arm64 Mac doesn't work**
   (QEMU crashes `rustc`) — this is why the image is built by CI, not on a
   dev machine. If you ever need a local amd64 build, do it on an actual

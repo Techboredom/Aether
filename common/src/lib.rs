@@ -81,6 +81,14 @@ pub struct ImageEntry {
     pub description: String,
 }
 
+/// Submitted by the Images admin tab to create or update a catalog entry.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SaveImageRequest {
+    pub name: String,
+    pub image: String,
+    pub description: String,
+}
+
 /// Submitted by the "create deployment" form.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CreateDeploymentRequest {
