@@ -81,11 +81,14 @@ frontend/src/create_deployment_tab.rs   Launch tab (template dropdown + form)
 frontend/src/templates_tab.rs   Templates admin tab (CRUD)
 frontend/src/users_tab.rs       Users admin tab (CRUD)
 frontend/src/env_editor.rs      Shared add/remove env-var-row widget (Launch + Templates)
-k8s/                       Kubernetes manifests to deploy the dashboard itself
 Dockerfile                 Multi-stage build: compiles both crates, ships a distroless image
-.forgejo/                  Forgejo Actions workflow that builds and pushes the image
+.forgejo/                  Forgejo Actions workflow that builds and pushes the image, then bumps the deploy repo
 SPEC.md                    The broader platform vision this app is a slice of
 ```
+
+Kubernetes manifests and the Argo CD `Application` that deploys this app
+live in a separate repo, **Aether-Deploy** — not here. See "GitOps deploy
+(Argo CD)" below for why, and for how the two repos fit together.
 
 ## Running locally
 
@@ -372,41 +375,42 @@ no shell, runs as a non-root user.
 ## CI (Forgejo Actions)
 
 `.forgejo/workflows/build.yml` builds and pushes the image to
-`ctr.int.example.com:8443/aether` on every push to `main` (except
-commits that only touch `k8s/**` — see below), on version tags (`v*`), or
-via manual dispatch. It tags the image with both the short git SHA and
-`latest`.
+`ctr.int.example.com:8443/aether` on every push to `main`, on version
+tags (`v*`), or via manual dispatch. It tags the image with both the short
+git SHA and `latest`.
 
-After a successful push, the same job also bumps the deploy: it downloads
-`kustomize`, runs `kustomize edit set image ...` inside `k8s/` to point
-`k8s/kustomization.yaml` at the new SHA-tagged image, and — if that actually
-changed anything — commits and pushes that one file straight to `main`. That
-commit only touches `k8s/kustomization.yaml`, which is exactly what the
-`paths-ignore: ["k8s/**"]` trigger filter exists to catch, so it doesn't
-loop back into another build. Argo CD (see "GitOps deploy" below) is what
-actually notices that commit and rolls the cluster forward — this job never
-touches the cluster itself, only the registry and its own git repo.
+After a successful push, the same job also bumps the deploy: it clones the
+separate **Aether-Deploy** repo (see "GitOps deploy" below — that's where
+this app's Kubernetes manifests actually live, not here), downloads
+`kustomize`, runs `kustomize edit set image ...` there to point its
+`kustomization.yaml` at the new SHA-tagged image, and — if that actually
+changed anything — commits and pushes that one file straight to
+Aether-Deploy's `main`. Argo CD is what actually notices that commit and
+rolls the cluster forward. This job never touches the cluster itself, or
+even this repo's own `main` — only the registry and Aether-Deploy's git
+history.
 
 Requires three repository secrets in Forgejo (Settings → Actions → Secrets):
 
 - `REGISTRY_USER` / `REGISTRY_PASSWORD` — container registry push access.
-- `FORGEJO_DEPLOY_TOKEN` — an access token with write access to this repo's
-  contents, used only to push the image-tag-bump commit above.
+- `FORGEJO_DEPLOY_TOKEN` — an access token with write access to
+  **Aether-Deploy's** contents (not this repo), used only to push the
+  image-tag-bump commit above.
 
 The runner must be labeled `docker` (matching `runs-on: docker` in the
 workflow) and have Docker available.
 
 ## Deploying to Kubernetes
 
-**This is now handled by Argo CD (see "GitOps deploy" below) — the steps
-here are the one-time bootstrap that got it there, not something to repeat
-on every change.** Manifests live in `k8s/` and deploy into the `aether`
-namespace (the app always watches its own namespace, via the pod's
-`metadata.namespace`, so watched namespace = deployed namespace). They're
-pinned to `amd64` nodes via `nodeSelector`, since the image is amd64-only.
+Kubernetes manifests, the Argo CD `Application`, and full deploy
+instructions live in the separate
+[**Aether-Deploy**](https://git.example.com/Aether/Aether-Deploy)
+repo — not here (see "GitOps deploy" below for why). Two things still need
+creating by hand directly in the cluster's `aether` namespace regardless,
+since they're credentials rather than manifests and shouldn't live in
+either git repo:
 
-1. **Image pull secret** — the registry requires auth, so the cluster needs
-   credentials to pull the image:
+1. **Image pull secret** — the registry requires auth:
 
    ```
    kubectl create secret docker-registry regcred \
@@ -423,55 +427,29 @@ pinned to `amd64` nodes via `nodeSelector`, since the image is amd64-only.
      --from-literal=DATABASE_URL='postgres://user:pass@host:5432/dbname'
    ```
 
-3. **Apply the manifests** (one-time bootstrap only — after Argo CD's
-   `Application` exists, it owns this and re-running it by hand just fights
-   Argo CD's `selfHeal`):
-
-   ```
-   kubectl apply -k k8s/
-   ```
-
-   This creates:
-   - `ServiceAccount` + `Role`/`RoleBinding` (`aether`) — scoped to the
-     `aether` namespace only, no cluster-wide permissions: `get`/`list`/`watch`
-     on `pods` plus `get` on `pods/log` and `get`/`list` on `events` (Pods tab
-     and its detail panel), and `create`/`get` on `apps/deployments` and on
-     `services` (Launch tab — the Service is how a launched app becomes
-     reachable, since there's no ingress controller; `get` is also used by
-     the reverse proxy to look up a proxy-enabled deployment's ClusterIP).
-   - `Deployment` (`aether`) — 1 replica, resource requests/limits set, health
-     probes on `/api/pods`, hardened `securityContext` (non-root, read-only
-     root filesystem, all capabilities dropped).
-   - `Service` (`aether`) — `type: LoadBalancer`, port `3000`, gets an
-     external IP from the cluster's MetalLB pool (`192.0.2.0/24`).
-
-4. **Find the external IP and open it:**
-
-   ```
-   kubectl get svc -n aether aether
-   ```
-
-   Then browse to `http://<external-ip>:3000`.
-
-### Watching a different namespace
-
-To watch a namespace other than `aether`, either:
-
-- Edit the `namespace:` field in `k8s/kustomization.yaml` (and re-run
-  `kubectl create secret docker-registry regcred ...` in that namespace too), or
-- Deploy a second copy of `k8s/` with a different `namespace` and a distinct
-  set of resource names, if you want multiple dashboards watching different
-  namespaces at once.
+Everything else — the `ServiceAccount`/`Role`/`RoleBinding`, `Deployment`,
+`Service`, and how to point at a different namespace — is documented in
+Aether-Deploy's own README.
 
 ## GitOps deploy (Argo CD)
 
 Once code merges to `main` and CI pushes a new image, something still has to
 actually roll it out to the cluster. That's Argo CD's job, not CI's — CI
-never holds cluster credentials at all, only registry and git-repo access
-(see "CI" above). This was a deliberate choice over having CI run
-`kubectl apply` directly: it keeps the only thing with cluster-write access
-running *inside* the cluster itself, watching for changes, rather than
-handing that power to a build runner.
+never holds cluster credentials at all, only registry access and git access
+to a *deploy* repo (see "CI" above). This was a deliberate choice over
+having CI run `kubectl apply` directly: it keeps the only thing with
+cluster-write access running *inside* the cluster itself, watching for
+changes, rather than handing that power to a build runner.
+
+**This app's manifests live in a separate repo, Aether-Deploy, not here.**
+That split (rather than a `k8s/` directory in this repo, which is how this
+was originally built) is deliberate: this repo's history stays pure
+app-code commits, the bot's tag-bump commits get their own repo instead of
+polluting this one, and the CI token that pushes those commits only ever
+needs write access to Aether-Deploy — not to this repo's actual source
+code. If you're rebuilding this setup elsewhere, "one repo for app code,
+one for rendered manifests + the Argo CD `Application`" is the pattern to
+follow from the start rather than splitting later.
 
 **One-time bootstrap** (already done for this cluster; recorded here for
 rebuilding it elsewhere):
@@ -495,44 +473,49 @@ rebuilding it elsewhere):
    argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d`
    — log in and change it.
 2. Trust this Forgejo host's SSH key (Argo CD ships known-hosts entries for
-   GitHub/GitLab/Bitbucket, not arbitrary self-hosted instances) and give it
-   a **read-only** deploy key for this repo:
+   GitHub/GitLab/Bitbucket, not arbitrary self-hosted instances):
    ```
    ssh-keyscan -p 2022 git.example.com
    ```
    merged into the `argocd-ssh-known-hosts-cm` ConfigMap's
-   `ssh_known_hosts` key (then `kubectl rollout restart deployment/argocd-repo-server -n argocd`
-   to pick it up). Generate a dedicated keypair (`ssh-keygen -t ed25519`),
-   add the *public* half as a read-only Deploy Key on the Forgejo repo, and
-   store the private half as a repository credential Argo CD reads directly:
+   `ssh_known_hosts` key (then `kubectl rollout restart
+   deployment/argocd-repo-server -n argocd` to pick it up). Generate a
+   dedicated keypair for Aether-Deploy specifically (`ssh-keygen -t
+   ed25519`) — don't reuse a personal key, and don't reuse the same key
+   across repos if this pattern grows to more apps, since scoping each
+   credential to exactly the repo it needs was the whole point of this
+   split. Add the *public* half as a read-only Deploy Key on the
+   **Aether-Deploy** repo, and store the private half as a repository
+   credential Argo CD reads directly:
    ```
-   kubectl create secret generic aether-repo-creds -n argocd \
+   kubectl create secret generic aether-deploy-repo-creds -n argocd \
      --from-literal=type=git \
-     --from-literal=url=ssh://git@git.example.com:2022/Aether/Aether-Web.git \
+     --from-literal=url=ssh://git@git.example.com:2022/Aether/Aether-Deploy.git \
      --from-file=sshPrivateKey=<path to private key>
-   kubectl label secret aether-repo-creds -n argocd argocd.argoproj.io/secret-type=repository
+   kubectl label secret aether-deploy-repo-creds -n argocd argocd.argoproj.io/secret-type=repository
    ```
    Never commit the private key — it only ever exists as this in-cluster
    Secret and a local temp file deleted right after.
-3. Apply the `Application` (`argocd/application.yaml`, kept outside `k8s/`
-   deliberately — Argo CD manages `k8s/`'s contents, it isn't one of the
-   things `k8s/` itself deploys):
+3. Apply the `Application` (lives in Aether-Deploy's repo root as
+   `application.yaml`, not in this repo at all):
    ```
-   kubectl apply -f argocd/application.yaml
+   kubectl apply -f application.yaml
    ```
-   It targets `path: k8s`, `targetRevision: main`, destination namespace
-   `aether`, with `syncPolicy.automated: {prune: true, selfHeal: true}` and
-   `CreateNamespace=true` — fully automatic from here on, no manual sync
-   button needed.
+   It targets Aether-Deploy's repo root (`path: .`), `targetRevision:
+   main`, destination namespace `aether`, with `syncPolicy.automated:
+   {prune: true, selfHeal: true}` and `CreateNamespace=true` — fully
+   automatic from here on, no manual sync button needed.
 
 **Steady-state loop** (this is the actual "build → deploy" pipeline): push
-to `main` → CI builds and pushes `ctr.int.example.com:8443/aether:<sha>`
-→ CI commits the new tag into `k8s/kustomization.yaml`'s `images:` override
-and pushes that to `main` → Argo CD's `Application` controller notices the
-new commit (polls every few minutes by default, or near-instantly with a
-Forgejo webhook configured later) and re-syncs, which rolls the `aether`
-Deployment to the new image. Check `kubectl get application aether -n
-argocd` for `Synced`/`Healthy` status, or the Argo CD UI.
+to this repo's `main` → CI builds and pushes
+`ctr.int.example.com:8443/aether:<sha>` → CI clones Aether-Deploy,
+bumps its `kustomization.yaml`'s `images:` override to the new tag, and
+pushes that commit to Aether-Deploy's `main` → Argo CD's `Application`
+controller notices the new commit there (polls every few minutes by
+default, or near-instantly with a Forgejo webhook configured later) and
+re-syncs, which rolls the `aether` Deployment to the new image. Check
+`kubectl get application aether -n argocd` for `Synced`/`Healthy` status, or
+the Argo CD UI.
 
 **Known limitation, same tradeoff every Argo CD install faces**: the
 standard install grants `argocd-application-controller` a cluster-scoped
@@ -682,13 +665,16 @@ gaps, in case they matter for what you do next:
   multi-GB vLLM/SGLang images, which would have been slow in this
   environment. Expect to iterate on their default resource sizing once you
   actually run one.
-- **Not yet deployed for real.** `k8s/` has only ever been validated with
-  `--dry-run=server`; nobody has run `kubectl apply -k k8s/` for real. You
-  still need to create the `regcred` and `aether-db` secrets in-cluster and
-  actually apply it (see "Deploying to Kubernetes" above).
+- **Not yet deployed for real, as of this writing** — Argo CD and the
+  Aether-Deploy repo are wired up (see "GitOps deploy" above), but the
+  first real sync hasn't completed yet: it's waiting on a Deploy Key being
+  added to Aether-Deploy and a `FORGEJO_DEPLOY_TOKEN` CI secret. You still
+  need to create the `regcred` and `aether-db` secrets in-cluster too (see
+  "Deploying to Kubernetes" above) — Argo CD doesn't manage those, on
+  purpose.
 - **No in-cluster Postgres.** `DATABASE_URL` currently has to point at a
-  Postgres you already run somewhere; there's no `k8s/postgres.yaml`. Add
-  one if you want this to be fully self-contained.
+  Postgres you already run somewhere; there's no manifest for one in
+  Aether-Deploy. Add one there if you want this to be fully self-contained.
 - **No admin UI for the image catalog** (only for templates) — entries are
   added with raw SQL (see "Image and template catalogs" above). Fine for a
   handful of images, less so at scale.
@@ -734,8 +720,8 @@ gaps, in case they matter for what you do next:
   routable from outside the cluster network. This is the one code path in
   this app that can't be exercised with the backend running locally against
   a remote cluster (this project's usual local-dev pattern); testing it for
-  real requires actually deploying Aether via `k8s/` (see "Not yet deployed
-  for real" below) — it was instead verified by curling a proxy-enabled
+  real requires actually deploying Aether via Aether-Deploy/Argo CD (see
+  "Not yet deployed for real" below) — it was instead verified by curling a proxy-enabled
   deployment's ClusterIP with the exact header Aether would send, from a
   throwaway pod inside the cluster, to confirm the target app accepts it
   correctly; the Rust-side HTTP/WebSocket-tunneling code was verified
