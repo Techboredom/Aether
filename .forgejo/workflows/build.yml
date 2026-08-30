@@ -87,3 +87,16 @@ jobs:
           git push origin HEAD:main
           cd /
           rm -rf /tmp/aether-deploy "$KUSTOMIZE"
+
+      # Host-mode runner: this machine's disk is shared across every job,
+      # not thrown away like a fresh per-job container would be. Clean up
+      # what this run produced so it doesn't pile up run after run.
+      # if: always() so a failure in an earlier step still leaves the disk
+      # clean, rather than needing the next run's steps to clean up first
+      # (like the leftover /tmp/aether-deploy this workflow used to hit).
+      - name: Clean up build artifacts
+        if: always()
+        run: |
+          rm -rf /tmp/aether-deploy "$PWD/kustomize"
+          docker image rm -f "$IMAGE:$TAG" "$IMAGE:latest" 2>/dev/null || true
+          docker image prune -f
