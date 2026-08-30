@@ -44,9 +44,13 @@ Launch; only admins see Templates and Users.
   new one (same fields as a template pre-fills into Launch, plus notes shown
   when it's selected there, plus an optional "auto-generate a secret for
   this env var" field and a "proxy through Aether" checkbox — see below).
-- **Users** *(admin only)* — create accounts (username, password, role) and
-  delete them. No self-service signup, no password reset flow — an admin
-  does both.
+- **Users** *(admin only)* — create accounts (username, password, role),
+  delete them, and reset any account's password without knowing the old one
+  (forces that account to log in again everywhere, on every device). Still
+  no self-service signup — an admin creates every account.
+
+Any logged-in user (either role) can change their own password via
+**Change password** in the header, which does require the current one.
 
 - **Backend**: Rust, [Axum](https://github.com/tokio-rs/axum) +
   [kube-rs](https://kube.rs) + [sqlx](https://github.com/launchbadge/sqlx)
@@ -140,9 +144,11 @@ additionally require the `admin` role (403 otherwise).
 - `POST /api/login` — body `{username, password}`; sets the `aether_session` cookie and returns the logged-in `UserInfo` on success, 401 on bad credentials
 - `POST /api/logout` — clears the session (both server-side and the cookie)
 - `GET /api/me` — returns the current `UserInfo` (`{id, username, role}`), or 401 if not logged in — this is what the frontend polls on load to decide whether to show the login page
+- `PUT /api/me/password` — body `{current_password, new_password}`; changes your own password, 400 if `current_password` doesn't match. Deletes every other session for your account (`DELETE FROM sessions WHERE user_id = $1 AND token != $2`) but leaves the one making this request logged in.
 - `GET /api/users` *(admin)* — list accounts (id, username, role — never password hashes)
 - `POST /api/users` *(admin)* — create an account; body `{username, password, role}` (`role` is `"admin"` or `"user"`); username 3-32 chars, password ≥ 8 chars
 - `DELETE /api/users/{id}` *(admin)* — delete an account; an admin can't delete their own account (guards against an easy self-lockout)
+- `PUT /api/users/{id}/password` *(admin)* — body `{password}`; resets another account's password without needing the old one — the admin role itself is the authorization. Deletes **all** of that account's sessions (there's no "current session" to preserve, since it isn't the admin's own).
 - `GET /api/pods` — JSON snapshot of the current pods in the watched namespace, filtered by role: a `user` only gets pods whose `aether.io/owner` label matches their own username, an `admin` gets all of them (each with its `owner` field populated). Pods for templates with a `secret_env_key` also carry a `credential: {env_key, value}` looked up from `deployment_secrets`, and pods for proxy-enabled templates carry a `proxy_path: "/proxy/<name>/"`.
 - `GET /ws` — WebSocket; sends a full snapshot on connect (same per-role filtering and credential enrichment as `GET /api/pods`), then `upsert`/`delete` events as pods change, filtered the same way per-connection
 - `GET /api/images` — JSON list of catalog entries from the `images` table (id, name, image, description)
@@ -500,18 +506,14 @@ the proxied WebSocket kernel connection and returned the correct output,
 confirming the upgrade-tunneling code path actually works and isn't just
 serving static pages. Known gaps, in case they matter for what you do next:
 
-- **No password reset or self-service anything.** An admin creates every
-  account (Users tab) with the password they'll use; there's no "forgot
-  password" or user-initiated password change. To rotate a compromised
-  password today, delete and recreate the account.
+- **Still no "forgot password" self-service flow** — that requires emailing
+  a reset link, which this app has no mechanism for (no SMTP config, no
+  email field on accounts). An admin can reset a locked-out user's password
+  from the Users tab instead (see below), which covers the "I forgot it"
+  case even without a self-service link.
 - **No login rate limiting.** `POST /api/login` has no lockout/backoff, so
   nothing but password strength (≥ 8 chars, enforced at creation) stands
   between an attacker and password guessing.
-- **Sessions aren't revoked on role/password change.** Deleting a user's
-  session rows (or the user itself, which cascades) is the only way to
-  force a re-login; changing a password isn't even possible yet (see above)
-  without deleting and recreating the account, which does invalidate old
-  sessions via the `ON DELETE CASCADE` on `sessions.user_id`.
 - **This is a scoped-down slice of `SPEC.md`, not the whole thing.** No
   ingress controller and no StorageClass exist in this cluster yet, so
   there's no Gateway layer and no persistent storage — launched apps

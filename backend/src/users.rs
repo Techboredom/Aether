@@ -1,6 +1,6 @@
 use axum::extract::{Path, State};
 use axum::Json;
-use common::{CreateUserRequest, Role, UserInfo};
+use common::{CreateUserRequest, ResetPasswordRequest, Role, UserInfo};
 use sqlx::FromRow;
 
 use crate::auth::{hash_password, AdminUser};
@@ -58,5 +58,28 @@ pub async fn delete_user(admin: AdminUser, State(state): State<AppState>, Path(i
         return Err(ApiError::BadRequest("you can't delete your own account".to_string()));
     }
     sqlx::query("DELETE FROM users WHERE id = $1").bind(id).execute(&state.pg).await?;
+    Ok(())
+}
+
+/// An admin can reset any account's password without knowing the old one —
+/// the admin role itself is the authorization. All of that account's
+/// sessions are invalidated, forcing a fresh login with the new password.
+pub async fn reset_password(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Path(id): Path<i32>,
+    Json(req): Json<ResetPasswordRequest>,
+) -> Result<(), ApiError> {
+    validate::password(&req.password)?;
+    let password_hash = hash_password(&req.password)?;
+    let result = sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
+        .bind(&password_hash)
+        .bind(id)
+        .execute(&state.pg)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::BadRequest(format!("user {id} not found")));
+    }
+    sqlx::query("DELETE FROM sessions WHERE user_id = $1").bind(id).execute(&state.pg).await?;
     Ok(())
 }
