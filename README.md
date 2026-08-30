@@ -16,29 +16,30 @@ Launch; only admins see Templates and Users.
   restarts, and age. A regular `user` only sees pods they launched
   themselves; an `admin` sees every pod in the namespace plus an **Owner**
   column showing who launched each one. A **Credential** column shows the
-  auto-generated login token/password/API key for templates that have one,
-  click-to-select for copying — and for proxy-enabled templates (JupyterLab),
-  an **Open** link that lands you in an already-logged-in session with zero
-  copy-paste (see "Ownership, auto-generated credentials, and the reverse
-  proxy" below). Click a row to open its detail panel: per-container state
-  and failure reason (`CrashLoopBackOff`, `ImagePullBackOff`, exit codes,
-  etc.), recent Kubernetes Events, and a log viewer (container picker, tail
-  length, previous-container logs for ones that crashed).
-- **Launch** — creates a `Deployment` (and, if a container port is given and
-  the template isn't proxy-enabled, a matching `LoadBalancer` Service, since
-  there's no ingress) in that namespace, owned by whichever account launched
-  it. The form's first field is a **Template** dropdown — Ollama, vLLM,
-  SGLang (Intelligence Layer) or JupyterLab, RStudio (Interface Layer), or
-  **Custom** — which pre-fills image, port, resource sizing, GPU defaults,
-  and any default env vars/args for that template. Every pre-filled field
-  stays editable, and Custom picks any image from the Postgres-backed image
-  catalog instead. Templates that carry a `secret_env_key` (JupyterLab,
-  RStudio, vLLM) hide that field from the form entirely and generate a
-  random value for it at launch time instead — shown once in the success
-  message and persistently on the Pods tab, no need to invent or type one
-  yourself. JupyterLab additionally skips the public Service altogether and
-  is only reachable by clicking "Open" — Aether proxies straight into it
-  with the token already applied.
+  auto-generated login token/API key for templates that have one,
+  click-to-select for copying — and for proxy-enabled templates (JupyterLab,
+  RStudio), an **Open** link that lands you in an already-logged-in session
+  with zero copy-paste (see "Ownership, auto-generated credentials, and the
+  reverse proxy" below). Click a row to open its detail panel: per-container
+  state and failure reason (`CrashLoopBackOff`, `ImagePullBackOff`, exit
+  codes, etc.), recent Kubernetes Events, and a log viewer (container
+  picker, tail length, previous-container logs for ones that crashed).
+- **Launch** — creates a `Deployment` in that namespace, owned by whichever
+  account launched it, and if a container port is given, also a Service
+  exposing it — `LoadBalancer` (public, since there's no ingress) by
+  default, or `ClusterIP`-only for templates with no auth of their own
+  (RStudio). The form's first field is a **Template** dropdown — Ollama,
+  vLLM, SGLang (Intelligence Layer) or JupyterLab, RStudio (Interface
+  Layer), or **Custom** — which pre-fills image, port, resource sizing, GPU
+  defaults, and any default env vars/args for that template. Every
+  pre-filled field stays editable, and Custom picks any image from the
+  Postgres-backed image catalog instead. Templates that carry a
+  `secret_env_key` (JupyterLab, vLLM) hide that field from the form
+  entirely and generate a random value for it at launch time instead —
+  shown once in the success message and persistently on the Pods tab, no
+  need to invent or type one yourself. JupyterLab and RStudio are also
+  reachable by clicking "Open" — Aether proxies straight into an
+  already-authenticated (or, for RStudio, auth-free) session.
 - **Templates** *(admin only)* — CRUD for the templates the Launch tab
   offers: a table of existing templates (edit/delete) and a form to add a
   new one (same fields as a template pre-fills into Launch, plus notes shown
@@ -153,10 +154,10 @@ additionally require the `admin` role (403 otherwise).
 - `GET /ws` — WebSocket; sends a full snapshot on connect (same per-role filtering and credential enrichment as `GET /api/pods`), then `upsert`/`delete` events as pods change, filtered the same way per-connection
 - `GET /api/images` — JSON list of catalog entries from the `images` table (id, name, image, description)
 - `GET /api/templates` — JSON list of templates (any logged-in role — needed for the Launch tab's dropdown)
-- `POST /api/templates` / `PUT /api/templates/{id}` *(admin)* — create/update a template. Body is a `TemplateEntry` minus `id`: `{name, image, container_port, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, env, args, notes, secret_env_key, proxy_enabled}` — only `name`/`image` are required, everything else defaults to empty/`null`/`false`. `secret_env_key`, if set, is the env var name (e.g. `JUPYTER_TOKEN`) that Launch should auto-generate instead of showing as an editable field. `proxy_enabled`, if `true`, requires `secret_env_key` to also be set (400 otherwise).
+- `POST /api/templates` / `PUT /api/templates/{id}` *(admin)* — create/update a template. Body is a `TemplateEntry` minus `id`: `{name, image, container_port, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, env, args, notes, secret_env_key, proxy_enabled, strip_prefix, public_service}` — only `name`/`image` are required, everything else defaults to empty/`null`/`false`/`true`. `secret_env_key`, if set, is the env var name (e.g. `JUPYTER_TOKEN`) that Launch should auto-generate instead of showing as an editable field — a proxy-enabled template doesn't need one (RStudio has none). `strip_prefix` and `public_service` only matter when `proxy_enabled` is set (see "the reverse proxy" above); `public_service = false` requires `proxy_enabled = true` (400 otherwise) — an app with no other way in would be unreachable.
 - `DELETE /api/templates/{id}` *(admin)* — delete a template
-- `POST /api/deployments` — creates a `Deployment` in the watched namespace (labeled `aether.io/owner: <your username>`), and if `container_port` is set and `enable_proxy` isn't, also a `LoadBalancer` Service exposing it (no ingress controller in the cluster, so this is how a non-proxied launched app becomes reachable). Body: `{name, image, replicas, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, container_port, env, args, generate_secret_for, enable_proxy}` — everything except `name`/`image`/`replicas` is optional; `env` is `[[key, value], ...]` pairs (entries with an empty value are dropped, so an image's own default behavior — e.g. an auto-generated password logged at startup — still applies unless you set one); `args` is a list of container command-line arguments (any occurrence of the literal string `{{name}}` is substituted with the deployment's own name first); `generate_secret_for`, if set to an env var name, generates a random value for it (overriding anything with that key in `env`) and stores it in `deployment_secrets`; `enable_proxy`, if `true`, requires both `generate_secret_for` and `container_port` to be set (400 otherwise), skips creating a Service entirely, and makes the app reachable only via `GET/POST/... /proxy/<name>/...`. Response adds `service_name`/`container_port` (both `null` if no port was given, `service_name` also `null` when proxied), `secret_value` (the generated value, or `null`), and `proxy_path` (`"/proxy/<name>/"` if `enable_proxy` was set, else `null`).
-- `ANY /proxy/{deployment_name}/{*rest}` — reverse-proxies into a proxy-enabled deployment's pod (`backend/src/proxy.rs`), injecting its generated credential as the appropriate auth header so there's no login prompt. 403 if you're not that deployment's owner (or an admin); 400 if the deployment isn't proxy-enabled; 502 if it has no running pod yet or the tunnel fails. Handles WebSocket upgrades transparently (needed for JupyterLab's kernel connections). See "Ownership, auto-generated credentials, and the reverse proxy" below.
+- `POST /api/deployments` — creates a `Deployment` in the watched namespace (labeled `aether.io/owner: <your username>`), and if `container_port` is set, also a Service exposing it — `LoadBalancer` (public, MetalLB-assigned external IP) if `public_service` is true (the default), `ClusterIP`-only otherwise. Body: `{name, image, replicas, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, container_port, env, args, generate_secret_for, enable_proxy, strip_prefix, public_service}` — everything except `name`/`image`/`replicas` is optional (`public_service` defaults to `true` if omitted); `env` is `[[key, value], ...]` pairs (entries with an empty value are dropped, so an image's own default behavior — e.g. an auto-generated password logged at startup — still applies unless you set one); `args` is a list of container command-line arguments (any occurrence of the literal string `{{name}}` is substituted with the deployment's own name first); `generate_secret_for`, if set to an env var name, generates a random value for it (overriding anything with that key in `env`) and stores it in `deployment_secrets`; `enable_proxy`, if `true`, requires `container_port` to be set (400 otherwise) and makes the app also reachable via `GET/POST/... /proxy/<name>/...`, with `strip_prefix` controlling how that route forwards paths (see "the reverse proxy" above); `public_service = false` requires `enable_proxy = true` (400 otherwise). Response adds `service_name`/`container_port` (both `null` if no port was given), `secret_value` (the generated value, or `null`), `proxy_path` (`"/proxy/<name>/"` if `enable_proxy` was set, else `null`), and `public_service` (echoes the request, so the frontend knows whether to mention an external IP).
+- `ANY /proxy/{deployment_name}`, `ANY /proxy/{deployment_name}/`, `ANY /proxy/{deployment_name}/{*rest}` — reverse-proxies into a proxy-enabled deployment's pod (`backend/src/proxy.rs`), injecting its generated credential (if any) as the appropriate auth header so there's no login prompt. The first two (bare path / trailing slash, no further segment) are what every "Open" link actually points at; the wildcard one handles everything else the app itself requests once loaded. 403 if you're not that deployment's owner (or an admin); 400 if the deployment isn't proxy-enabled; 502 if the connection to its pod fails or times out (5s). Handles WebSocket upgrades transparently (needed for JupyterLab's kernel connections). See "Ownership, auto-generated credentials, and the reverse proxy" below.
 - `GET /api/pods/{name}/logs?container=&tail_lines=&previous=` — plain-text container logs (`container` defaults to the pod's only container if it has one; `tail_lines` defaults to 500; `previous=true` gets the last terminated instance's logs, for a crashed container)
 - `GET /api/pods/{name}/events` — JSON list of Kubernetes Events involving that pod (`type_`, `reason`, `message`, `count`, `last_seen`), most recent first — note the apiserver's default Event TTL is short (commonly ~1h), so older pods often have none left
 - `GET /*` — serves the built frontend (`index.html`, JS, WASM, CSS)
@@ -205,7 +206,9 @@ CREATE TABLE templates (
     args TEXT[] NOT NULL DEFAULT '{}',  -- ["--model=...", ...]
     notes TEXT NOT NULL DEFAULT '',
     secret_env_key TEXT,                -- e.g. "JUPYTER_TOKEN"; NULL means no auto-generated secret
-    proxy_enabled BOOLEAN NOT NULL DEFAULT false,  -- reverse-proxy instead of a public Service; requires secret_env_key
+    proxy_enabled BOOLEAN NOT NULL DEFAULT false,   -- also reachable via Aether's /proxy/<name>/
+    strip_prefix BOOLEAN NOT NULL DEFAULT false,    -- see "the reverse proxy" below
+    public_service BOOLEAN NOT NULL DEFAULT true,   -- LoadBalancer (true) vs ClusterIP-only (false)
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
@@ -213,10 +216,10 @@ CREATE TABLE templates (
 It ships seeded with the same five templates (Ollama, vLLM, SGLang,
 JupyterLab, RStudio) that used to be hardcoded in the frontend — edit or
 delete them from the Templates tab like any other row. JupyterLab
-(`JUPYTER_TOKEN`), RStudio (`PASSWORD`), and vLLM (`VLLM_API_KEY`) are seeded
-with a `secret_env_key`; Ollama and SGLang aren't (Ollama has no auth
-mechanism at all, and SGLang's equivalent env var name wasn't confirmed).
-Only JupyterLab is seeded `proxy_enabled` — see below.
+(`JUPYTER_TOKEN`) and vLLM (`VLLM_API_KEY`) are seeded with a
+`secret_env_key`; Ollama, SGLang, and RStudio aren't (Ollama and SGLang have
+no auth mechanism at all; RStudio runs with its own auth fully disabled —
+see below). Both JupyterLab and RStudio are seeded `proxy_enabled`.
 
 ## Ownership, auto-generated credentials, and the reverse proxy
 
@@ -227,22 +230,22 @@ and its underlying REST/WebSocket endpoints filter on this label: a `user`
 account only ever sees pods it launched itself; an `admin` sees everything,
 with an extra **Owner** column.
 
-Templates with a `secret_env_key` (JupyterLab, RStudio, vLLM) don't expose
-that field as editable input on the Launch form at all — instead, the
-backend generates a random 48-character alphanumeric value (the same
-generator used for session tokens), injects it as that env var on the
-container, and stores it in a `deployment_secrets` table keyed by the
-Deployment's name:
+Templates with a `secret_env_key` (JupyterLab, vLLM) don't expose that field
+as editable input on the Launch form at all — instead, the backend
+generates a random 48-character alphanumeric value (the same generator used
+for session tokens), injects it as that env var on the container, and
+stores it in a `deployment_secrets` table keyed by the Deployment's name:
 
 ```sql
 CREATE TABLE deployment_secrets (
     deployment_name TEXT PRIMARY KEY,
     namespace TEXT NOT NULL,
-    env_key TEXT NOT NULL,
-    secret_value TEXT NOT NULL,
+    env_key TEXT,           -- NULL if this deployment has no generated credential at all
+    secret_value TEXT,      -- NULL alongside env_key
     owner_username TEXT NOT NULL,
     proxy_enabled BOOLEAN NOT NULL DEFAULT false,
     container_port INTEGER,
+    strip_prefix BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
@@ -250,47 +253,79 @@ CREATE TABLE deployment_secrets (
 The value is shown once in the Launch success message and persistently in
 the Pods tab's Credential column (for whoever can see that pod — the same
 ownership filtering applies). Re-launching under the same Deployment name
-replaces the stored value.
+replaces the stored value. A row exists here for *any* proxy-enabled
+deployment, credential or not — see RStudio below for why.
 
-**JupyterLab goes one step further and genuinely works like JupyterHub**:
-its template is `proxy_enabled`, which doesn't change what gets created at
-launch time (it still gets the same `LoadBalancer` Service as any other
-templated app, directly reachable the same way) — it adds a *second*,
-friction-free way in: Aether's own `GET/POST/... /proxy/<name>/{*rest}`
-route (`backend/src/proxy.rs`), which:
+**JupyterLab and RStudio genuinely work like JupyterHub**: both templates
+are `proxy_enabled`, meaning they're also reachable via Aether's own
+`GET/POST/... /proxy/<name>/{*rest}` route (`backend/src/proxy.rs`, plus two
+bare-path variants registered alongside it in `main.rs` — every "Open" link
+points at the bare `/proxy/<name>/` with no trailing segment, which
+matchit's `{*rest}` wildcard doesn't match on its own). The handler:
 
 1. Checks you own that deployment (or are an admin) — same rule as the Pods
    tab's visibility filtering.
-2. Looks up that Service and connects to its in-cluster `ClusterIP` directly
-   (`kube`'s `Api<Service>::get`, RBAC already covers `get` on `services`).
-   This is the conventional in-cluster design, and it assumes Aether itself
-   is running **in-cluster** — a `ClusterIP` isn't routable from outside the
-   cluster network, so this specific hop can't be exercised with the backend
-   running locally against a remote cluster, unlike everything else in this
-   app (see "Status & known limitations"). The connection attempt times out
-   after 5 seconds either way, so a stuck/unready pod fails fast rather than
-   hanging the request.
-3. Injects `Authorization: token <value>` (Jupyter Server's documented
-   token-header convention) into every proxied request, so you land directly
-   in a logged-in JupyterLab session — click "Open" on the Pods tab (or the
-   Launch success message) and go, no token to copy or paste anywhere.
-4. Transparently tunnels WebSocket upgrades too (via `hyper::upgrade` +
+2. Looks up that deployment's Service and connects to its in-cluster
+   `ClusterIP` directly (`kube`'s `Api<Service>::get`, RBAC already covers
+   `get` on `services`) — whether that Service is itself a public
+   `LoadBalancer` or `ClusterIP`-only makes no difference here, both have a
+   ClusterIP. This is the conventional in-cluster design, and it assumes
+   Aether itself is running **in-cluster** — a `ClusterIP` isn't routable
+   from outside the cluster network, so this specific hop can't be
+   exercised with the backend running locally against a remote cluster,
+   unlike everything else in this app (see "Status & known limitations").
+   The connection attempt times out after 5 seconds either way, so a
+   stuck/unready pod fails fast (502) rather than hanging the request.
+3. Injects an `Authorization` header for the credential, if the deployment
+   has one — `token <value>` for `JUPYTER_TOKEN` (Jupyter Server's
+   documented convention). No header at all if there's no credential
+   (RStudio — see below).
+4. Forwards the request path one of two ways, per the template's
+   `strip_prefix`: JupyterLab (`false`) wants the full
+   `/proxy/<name>/...` path forwarded as-is, since `--ServerApp.base_url`
+   registers its own routes under that prefix. RStudio (`true`) is the
+   *opposite* — its `www-root-path` setting only stamps that prefix onto
+   redirects and cookies sent back to the browser, and it still expects
+   requests to arrive at the bare path, so the proxy strips the prefix
+   first. (Confirmed by hand against a real `rocker/rstudio` container:
+   hitting the prefixed path 404s, while hitting the bare path with
+   `www-root-path` set produces a redirect whose `Location` header — and
+   whose `Set-Cookie` `Path` attributes — correctly include the prefix,
+   because the proxy also forwards the original `Host` header unchanged.)
+5. Transparently tunnels WebSocket upgrades too (via `hyper::upgrade` +
    `tokio::io::copy_bidirectional`), which is what makes JupyterLab's kernel
    connections (running notebook cells) work through the proxy, not just
    static pages.
 
-This requires the template's own `args` to tell the app it's being served
-under a path prefix — JupyterLab's seeded args are `["start-notebook.sh",
+JupyterLab's seeded args are `["start-notebook.sh",
 "--ServerApp.base_url=/proxy/{{name}}/"]`, where `{{name}}` is a generic
 placeholder substituted with the deployment's own name at launch time (any
-template's `args` can use it, not just JupyterLab's). **Only JupyterLab
-ships proxy-enabled today** — it has documented, reliable support for both
-the path-prefix flag and the token-header convention. RStudio's equivalent
-(`www-root-path`) hasn't been verified against the `rocker/rstudio` image's
-entrypoint, so it keeps its own public LoadBalancer Service and manual
-credential paste for now (flip its `proxy_enabled` column once that's
-checked). vLLM is intentionally never proxied: its `VLLM_API_KEY` is meant
-for scripted API clients setting their own `Authorization: Bearer <key>`
+template's `args` can use it). Kubernetes' `args` field *replaces* a
+container's default command rather than appending to it, which is why the
+start script has to be named explicitly — leaving it out makes the
+container try (and fail) to `exec` the flag itself as a program.
+
+**RStudio runs with its own authentication fully disabled** (`env:
+[["DISABLE_AUTH", "true"]]`) and relies entirely on Aether's login plus the
+ownership check above — there's no credential to generate or inject at all,
+and no login prompt to skip, because RStudio simply never asks. This is
+only safe because its template also sets `public_service = false`: Launch
+creates a `ClusterIP`-only Service for it instead of a public
+`LoadBalancer`, so the *only* way to reach it is through Aether's own login
+followed by that ownership check — nothing on the network can hit it
+directly. Its `args` are a small shell wrapper (`rocker/rstudio`'s
+`ENTRYPOINT` is empty, so `args` alone becomes the whole command line):
+```
+/bin/bash -c 'echo "www-root-path=/proxy/{{name}}/" >> /etc/rstudio/disable_auth_rserver.conf && exec /init'
+```
+`disable_auth_rserver.conf` is the config file the image's own init script
+copies over `rserver.conf` when `DISABLE_AUTH=true` — appending to it
+first, then letting `/init` run normally, is what gets `www-root-path` set
+without needing a mounted config file or overriding the image's own init
+logic.
+
+vLLM is intentionally never proxied: its `VLLM_API_KEY` is meant for
+scripted API clients setting their own `Authorization: Bearer <key>`
 header, not a browser session — it already matches real
 bearer-token-via-header usage without needing a proxy in front of it, and
 forcing it through Aether's cookie-based login would only get in the way of
@@ -299,9 +334,7 @@ automation.
 Each proxied HTTP request currently opens a fresh TCP connection and
 HTTP/1.1 handshake to the pod rather than reusing a pooled connection —
 correct and simple, but adds latency per request; pooling is a reasonable
-future optimization, not a correctness issue. The connection attempt times
-out after 5 seconds, so an unready or unreachable pod fails fast (502)
-instead of hanging the request.
+future optimization, not a correctness issue.
 
 ## Building the container image
 
@@ -463,10 +496,12 @@ in-cluster client would.
   Ollama and SGLang have no auto-generated credential (see "Ownership, auto-generated
   credentials, and the reverse proxy" above) — set your own token/password via the
   env var editor if the image supports one, otherwise it's either unauthenticated
-  or gets a random value visible only in the pod's own logs. JupyterLab,
-  RStudio, and vLLM get an auto-generated credential, stored **in plaintext**
-  in the `deployment_secrets` table (no encryption at rest) and visible to
-  the owning user and any admin via the Pods tab.
+  or gets a random value visible only in the pod's own logs. RStudio runs
+  with its own auth *deliberately* disabled and no public Service at all —
+  Aether's login is the only gate. JupyterLab and vLLM get an auto-generated
+  credential instead, stored **in plaintext** in the `deployment_secrets`
+  table (no encryption at rest) and visible to the owning user and any admin
+  via the Pods tab.
 - Pod ownership (`aether.io/owner` label) and the Pods-tab visibility
   filtering it drives are enforced entirely in the Aether backend at read
   time, not via Kubernetes RBAC or admission control — the label itself is
@@ -498,13 +533,22 @@ validation rule in `backend/src/validate.rs` confirmed to actually reject
 its bad input (bad k8s name, out-of-range port, malformed quantity, bad env
 key, path-injection-shaped pod name, weak password) via curl. The reverse
 proxy was verified against a real `jupyter/base-notebook` pod launched by a
-`user`-role account: no Service was created, `/proxy/<name>/` served
-JupyterLab with the token already applied (no login prompt), a second
-non-owning user got 403 while an admin could still open it, and — the part
-most likely to silently break — a real notebook cell was executed through
-the proxied WebSocket kernel connection and returned the correct output,
-confirming the upgrade-tunneling code path actually works and isn't just
-serving static pages. Known gaps, in case they matter for what you do next:
+`user`-role account: `/proxy/<name>/` (the bare path every "Open" link
+actually uses) served JupyterLab with the token already applied (no login
+prompt), a second non-owning user got 403 on that exact path while an admin
+could still open it, and — the part most likely to silently break — a real
+notebook cell was executed through the proxied WebSocket kernel connection
+and returned the correct output, confirming the upgrade-tunneling code path
+actually works and isn't just serving static pages. (That "bare path"
+qualifier matters: an earlier verification pass only ever tested
+`/proxy/<name>/lab`, which masked a real bug where the bare path — with no
+segment after the trailing slash — didn't match the route at all and fell
+through to the frontend's own SPA fallback; fixed by adding two explicit
+routes for it, see `backend/src/proxy.rs::handler_root`.) A parallel
+`rocker/rstudio` pod, launched with `DISABLE_AUTH=true` and `public_service:
+false`, was confirmed to get a `ClusterIP`-only Service (no external IP at
+all) and to correctly reject a non-owner on that same bare path. Known
+gaps, in case they matter for what you do next:
 
 - **Still no "forgot password" self-service flow** — that requires emailing
   a reset link, which this app has no mechanism for (no SMTP config, no
@@ -552,13 +596,24 @@ serving static pages. Known gaps, in case they matter for what you do next:
   `Secret` or any encrypted store, and persist after the pod that used them
   is gone (no cleanup job) — anyone with `deployment_secrets` table access
   can read every credential ever generated, past or present.
-- **Only JupyterLab gets true JupyterHub-style transparent auth** (reverse
-  proxy + injected header, click "Open" and you're in). RStudio and vLLM
-  still just display a credential for copy/paste — RStudio because its
-  path-prefix support is unverified (see the vLLM/SGLang gap above for the
-  same kind of caveat), vLLM because it's meant for scripted API clients
-  where a proxied cookie-auth flow would be more friction, not less. See
-  "Ownership, auto-generated credentials, and the reverse proxy" above.
+- **JupyterLab and RStudio get true JupyterHub-style transparent auth**
+  (reverse proxy + injected credential or, for RStudio, no auth at all —
+  click "Open" and you're in). vLLM still just displays a credential for
+  copy/paste, deliberately — it's meant for scripted API clients where a
+  proxied cookie-auth flow would be more friction, not less. See "Ownership,
+  auto-generated credentials, and the reverse proxy" above.
+- **RStudio's no-auth mode was verified as thoroughly as possible without
+  deploying Aether in-cluster.** Confirmed by hand against a real
+  `rocker/rstudio` container: `DISABLE_AUTH=true` + the `www-root-path`
+  config line produce the expected redirect/cookie behavior when the
+  correct `Host` header is forwarded (which the proxy does). What's *not*
+  confirmed is a real browser session completing that flow through Aether's
+  actual `/proxy/` route end to end — same ClusterIP-reachability limitation
+  as JupyterLab's proxy path (see below), compounded by RStudio's own
+  user-agent sniffing making command-line verification less conclusive than
+  Puppeteer-based verification was for JupyterLab. Worth a real click-through
+  once Aether is deployed in-cluster, before relying on it for anything
+  sensitive.
 - **The reverse proxy opens a fresh TCP connection per HTTP request**, not a
   pooled/reused one — correctness over performance for this first pass. Fine
   for interactive single-user use; would need pooling before it'd hold up

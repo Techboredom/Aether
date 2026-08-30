@@ -33,6 +33,8 @@ pub fn CreateDeploymentTab() -> impl IntoView {
     let notes = RwSignal::new(None::<String>);
     let secret_env_key = RwSignal::new(None::<String>);
     let proxy_enabled = RwSignal::new(false);
+    let strip_prefix = RwSignal::new(false);
+    let public_service = RwSignal::new(true);
 
     let submitting = RwSignal::new(false);
     let result: RwSignal<Option<LaunchResult>> = RwSignal::new(None);
@@ -77,6 +79,8 @@ pub fn CreateDeploymentTab() -> impl IntoView {
         args_text.set(t.args.join("\n"));
         secret_env_key.set(t.secret_env_key.clone());
         proxy_enabled.set(t.proxy_enabled);
+        strip_prefix.set(t.strip_prefix);
+        public_service.set(t.public_service);
     };
 
     let reset_to_custom = move || {
@@ -94,6 +98,8 @@ pub fn CreateDeploymentTab() -> impl IntoView {
         args_text.set(String::new());
         secret_env_key.set(None);
         proxy_enabled.set(false);
+        strip_prefix.set(false);
+        public_service.set(true);
     };
 
     let on_template_change = move |ev: web_sys::Event| {
@@ -138,6 +144,8 @@ pub fn CreateDeploymentTab() -> impl IntoView {
             args,
             generate_secret_for: secret_env_key.get(),
             enable_proxy: proxy_enabled.get(),
+            strip_prefix: strip_prefix.get(),
+            public_service: public_service.get(),
         };
 
         submitting.set(true);
@@ -183,11 +191,12 @@ pub fn CreateDeploymentTab() -> impl IntoView {
                     proxy_enabled
                         .get()
                         .then(|| {
-                            view! {
-                                <div class="template-notes">
-                                    "Opens through Aether directly — no public IP, no separate login."
-                                </div>
-                            }
+                            let text = if public_service.get() {
+                                "Also opens through Aether directly — no separate login needed via that route."
+                            } else {
+                                "Opens through Aether only — no public IP, no login of its own; Aether's own login is the only way in."
+                            };
+                            view! { <div class="template-notes">{text}</div> }
                         })
                 }}
 
@@ -400,10 +409,16 @@ async fn submit(req: CreateDeploymentRequest) -> LaunchResult {
             resp.json().await.map_err(|err| format!("failed to parse response: {err}"))?;
         let mut msg = format!("Created deployment \"{}\" in namespace \"{}\".", created.name, created.namespace);
         if let (Some(service), Some(port)) = (created.service_name, created.container_port) {
-            msg.push_str(&format!(
-                " Exposed via Service \"{service}\" on port {port} — check `kubectl get svc -n {}` for its external IP.",
-                created.namespace
-            ));
+            if created.public_service {
+                msg.push_str(&format!(
+                    " Exposed via Service \"{service}\" on port {port} — check `kubectl get svc -n {}` for its external IP.",
+                    created.namespace
+                ));
+            } else {
+                msg.push_str(&format!(
+                    " Service \"{service}\" has no public IP — reachable only through Aether's own login."
+                ));
+            }
         }
         if let Some(secret) = created.secret_value {
             msg.push_str(&format!(" Generated credential: {secret} (also shown on the Pods tab)."));

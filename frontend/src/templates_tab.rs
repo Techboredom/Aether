@@ -27,6 +27,8 @@ pub fn TemplatesTab() -> impl IntoView {
     let notes_text = RwSignal::new(String::new());
     let secret_env_key = RwSignal::new(String::new());
     let proxy_enabled = RwSignal::new(false);
+    let strip_prefix = RwSignal::new(false);
+    let public_service = RwSignal::new(true);
 
     let saving = RwSignal::new(false);
     let form_result: RwSignal<Option<Result<String, String>>> = RwSignal::new(None);
@@ -64,6 +66,8 @@ pub fn TemplatesTab() -> impl IntoView {
         notes_text.set(String::new());
         secret_env_key.set(String::new());
         proxy_enabled.set(false);
+        strip_prefix.set(false);
+        public_service.set(true);
     };
 
     let load_into_form = move |t: &TemplateEntry| {
@@ -82,6 +86,8 @@ pub fn TemplatesTab() -> impl IntoView {
         notes_text.set(t.notes.clone());
         secret_env_key.set(t.secret_env_key.clone().unwrap_or_default());
         proxy_enabled.set(t.proxy_enabled);
+        strip_prefix.set(t.strip_prefix);
+        public_service.set(t.public_service);
         form_result.set(None);
     };
 
@@ -135,6 +141,8 @@ pub fn TemplatesTab() -> impl IntoView {
                 if key.is_empty() { None } else { Some(key) }
             },
             proxy_enabled: proxy_enabled.get(),
+            strip_prefix: strip_prefix.get(),
+            public_service: public_service.get(),
         };
 
         let id = editing_id.get();
@@ -170,6 +178,7 @@ pub fn TemplatesTab() -> impl IntoView {
                             <th>"Accelerator"</th>
                             <th>"Secret"</th>
                             <th>"Proxy"</th>
+                            <th>"Public"</th>
                             <th></th>
                         </tr>
                     </thead>
@@ -188,6 +197,7 @@ pub fn TemplatesTab() -> impl IntoView {
                                         <td>{format::accelerator_summary(&t.accelerator_type, t.accelerator_count)}</td>
                                         <td>{t.secret_env_key.clone().unwrap_or_else(|| "—".into())}</td>
                                         <td>{if t.proxy_enabled { "yes" } else { "—" }}</td>
+                                        <td>{if t.public_service { "yes" } else { "no" }}</td>
                                         <td class="table-actions">
                                             <button type="button" class="icon-button" on:click=move |_| load_into_form(&t_for_edit)>
                                                 "Edit"
@@ -357,11 +367,30 @@ pub fn TemplatesTab() -> impl IntoView {
                 <label class="checkbox">
                     <input
                         type="checkbox"
-                        disabled=move || secret_env_key.get().trim().is_empty()
                         prop:checked=move || proxy_enabled.get()
                         on:change=move |ev| proxy_enabled.set(event_target_checked(&ev))
                     />
-                    "Proxy through Aether (no public LoadBalancer; requires a generated secret above)"
+                    "Also reachable via Aether's own /proxy/<name>/ route (injects the generated secret above, if any)"
+                </label>
+
+                <label class="checkbox">
+                    <input
+                        type="checkbox"
+                        disabled=move || !proxy_enabled.get()
+                        prop:checked=move || strip_prefix.get()
+                        on:change=move |ev| strip_prefix.set(event_target_checked(&ev))
+                    />
+                    "Strip the /proxy/<name>/ prefix before forwarding (for apps like RStudio that expect to run at the root path, unlike JupyterLab)"
+                </label>
+
+                <label class="checkbox">
+                    <input
+                        type="checkbox"
+                        disabled=move || !proxy_enabled.get()
+                        prop:checked=move || public_service.get()
+                        on:change=move |ev| public_service.set(event_target_checked(&ev))
+                    />
+                    "Public LoadBalancer Service (uncheck for apps with no auth of their own — Aether's login becomes the only way in)"
                 </label>
 
                 <div class="form-actions">

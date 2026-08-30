@@ -91,6 +91,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/pods/{name}/logs", get(logs::get_pod_logs))
         .route("/api/pods/{name}/events", get(events::get_pod_events))
         .route("/ws", get(ws::ws_handler))
+        // The bare/trailing-slash routes exist because matchit's `{*rest}`
+        // wildcard requires at least one character after the slash — without
+        // them, every "Open" link (which points at the bare
+        // "/proxy/<name>/") would silently miss this route entirely and hit
+        // the SPA fallback below instead. See proxy::handler_root.
+        .route("/proxy/{deployment_name}", any(proxy::handler_root))
+        .route("/proxy/{deployment_name}/", any(proxy::handler_root))
         .route("/proxy/{deployment_name}/{*rest}", any(proxy::handler))
         .fallback_service(static_service)
         .layer(CorsLayer::permissive())

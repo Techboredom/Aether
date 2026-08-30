@@ -112,13 +112,31 @@ pub struct CreateDeploymentRequest {
     /// template's `secret_env_key`.
     #[serde(default)]
     pub generate_secret_for: Option<String>,
-    /// If set, no public Service is created — the app is only reachable via
-    /// Aether's own `/proxy/<name>/` route, which injects the generated
-    /// credential automatically. Requires `generate_secret_for` and
-    /// `container_port` to both be set. Comes from the selected template's
-    /// `proxy_enabled`.
+    /// If set, the app is also reachable via Aether's own `/proxy/<name>/`
+    /// route, which injects the generated credential automatically (if any).
+    /// Requires `container_port` to be set. Comes from the selected
+    /// template's `proxy_enabled`.
     #[serde(default)]
     pub enable_proxy: bool,
+    /// Whether the proxy should forward the full `/proxy/<name>/...` path to
+    /// the container as-is (`false`, e.g. JupyterLab's `base_url`) or strip
+    /// that prefix first (`true`, e.g. RStudio's `www-root-path`, which only
+    /// stamps the prefix onto outgoing redirects/cookies and still expects
+    /// requests at the bare path). Only meaningful when `enable_proxy` is
+    /// set. Comes from the selected template's `strip_prefix`.
+    #[serde(default)]
+    pub strip_prefix: bool,
+    /// Whether Launch creates a public `LoadBalancer` Service (`true`,
+    /// default) or a `ClusterIP`-only one (`false`) — must be `false` for
+    /// any app with no auth of its own, since Aether's proxy ownership
+    /// check then becomes the only thing gating access. Comes from the
+    /// selected template's `public_service`.
+    #[serde(default = "default_true")]
+    pub public_service: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -133,6 +151,11 @@ pub struct CreateDeploymentResponse {
     /// Present if `enable_proxy` was set — the root-relative path that opens
     /// this deployment through Aether with the credential already injected.
     pub proxy_path: Option<String>,
+    /// Whether `service_name` (if any) is a public `LoadBalancer` or a
+    /// `ClusterIP`-only Service — the frontend uses this to avoid telling
+    /// someone to go check `kubectl get svc` for an external IP that
+    /// doesn't exist.
+    pub public_service: bool,
 }
 
 /// A Kubernetes Event involving a specific pod (scheduling failures, image pull
@@ -173,11 +196,19 @@ pub struct TemplateEntry {
     /// var automatically instead of showing it as an editable field — e.g.
     /// JupyterLab's `"JUPYTER_TOKEN"`, RStudio's `"PASSWORD"`.
     pub secret_env_key: Option<String>,
-    /// If true, launching this template skips the public LoadBalancer
-    /// Service and is only reachable via Aether's `/proxy/<name>/` route
-    /// instead, with `secret_env_key`'s generated value injected
-    /// automatically — no separate login. Requires `secret_env_key` to be set.
+    /// If true, this app is also reachable via Aether's `/proxy/<name>/`
+    /// route, with `secret_env_key`'s generated value injected automatically
+    /// (if any) — no separate login for that path.
     pub proxy_enabled: bool,
+    /// Whether the proxy strips the `/proxy/<name>/` prefix before
+    /// forwarding to the container. See `CreateDeploymentRequest::strip_prefix`.
+    pub strip_prefix: bool,
+    /// Whether Launch creates a public `LoadBalancer` Service (default) or
+    /// a `ClusterIP`-only one. Must be `false` for templates with no
+    /// `secret_env_key` and no other auth of their own (e.g. RStudio run
+    /// with `DISABLE_AUTH=true`), since Aether's own login is then the only
+    /// gate.
+    pub public_service: bool,
 }
 
 /// Submitted by the Templates admin tab to create or update a template.
@@ -197,6 +228,8 @@ pub struct SaveTemplateRequest {
     pub notes: String,
     pub secret_env_key: Option<String>,
     pub proxy_enabled: bool,
+    pub strip_prefix: bool,
+    pub public_service: bool,
 }
 
 /// The two account classes. Admins can manage templates and accounts; both
