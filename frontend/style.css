@@ -631,6 +631,38 @@ tbody tr:hover {
   cursor: default;
 }
 
+.danger-button {
+  justify-self: start;
+  background: var(--status-critical);
+  color: #ffffff;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 11px 20px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: filter 150ms ease;
+}
+
+.danger-button:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.danger-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.manage-deployment {
+  margin-top: var(--space-4);
+}
+
+.manage-deployment .hint {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin: 0 0 var(--space-2);
+}
+
 .clickable-row {
   cursor: pointer;
 }

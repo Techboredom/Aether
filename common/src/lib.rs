@@ -171,6 +171,41 @@ pub struct CreateDeploymentResponse {
     pub public_service: bool,
 }
 
+/// Current editable state of a running Deployment, returned by `GET
+/// /api/deployments/{name}` to pre-fill the Pods tab's manage panel.
+/// Image, container port, accelerator, and args are fixed at launch time —
+/// changing those is a delete + relaunch, not an edit.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentDetail {
+    pub name: String,
+    pub replicas: i32,
+    pub cpu_request: Option<String>,
+    pub cpu_limit: Option<String>,
+    pub memory_request: Option<String>,
+    pub memory_limit: Option<String>,
+    /// User-editable env vars — excludes the auto-generated secret's entry,
+    /// if any (see `generated_secret_key`).
+    pub env: Vec<(String, String)>,
+    /// The env var key managed by an auto-generated secret (e.g.
+    /// `"JUPYTER_TOKEN"`), if this deployment has one. Shown read-only in
+    /// the manage panel rather than as an editable row, since its value is
+    /// generated server-side and would otherwise be silently overwritten or
+    /// blanked by a resubmit of `env`.
+    pub generated_secret_key: Option<String>,
+}
+
+/// Submitted to `PUT /api/deployments/{name}` to scale and/or update
+/// resources and env vars on an existing Deployment.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct UpdateDeploymentRequest {
+    pub replicas: i32,
+    pub cpu_request: Option<String>,
+    pub cpu_limit: Option<String>,
+    pub memory_request: Option<String>,
+    pub memory_limit: Option<String>,
+    pub env: Vec<(String, String)>,
+}
+
 /// A Kubernetes Event involving a specific pod (scheduling failures, image pull
 /// errors, OOM kills, etc. all surface here, often before it's visible any other way).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

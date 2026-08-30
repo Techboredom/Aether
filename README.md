@@ -86,8 +86,10 @@ backend/src/users.rs       Users admin CRUD (admin-only)
 backend/src/validate.rs    Input validation (k8s names, ports, quantities, env keys, ...)
 backend/src/visibility.rs  Per-user pod filtering + credential/proxy-path enrichment (admin sees all, user sees own)
 backend/src/proxy.rs       Reverse proxy for proxy-enabled templates (JupyterLab) — ClusterIP connection + credential injection
+backend/src/deployments.rs Create/get/update/delete a Deployment, ownership checks, launch history
 frontend/src/login.rs      Login page
 frontend/src/pods_tab.rs   Pods tab + detail panel
+frontend/src/deployment_manage.rs  Scale/edit/delete panel for a Deployment, shown in the pod detail panel
 frontend/src/create_deployment_tab.rs   Launch tab (template dropdown + form)
 frontend/src/templates_tab.rs   Templates admin tab (CRUD)
 frontend/src/images_tab.rs      Images admin tab (CRUD, backs "Custom" mode on Launch)
@@ -174,6 +176,9 @@ additionally require the `admin` role (403 otherwise).
 - `POST /api/templates` / `PUT /api/templates/{id}` *(admin)* — create/update a template. Body is a `TemplateEntry` minus `id`: `{name, image, container_port, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, env, args, notes, secret_env_key, proxy_enabled, strip_prefix, public_service}` — only `name`/`image` are required, everything else defaults to empty/`null`/`false`/`true`. `secret_env_key`, if set, is the env var name (e.g. `JUPYTER_TOKEN`) that Launch should auto-generate instead of showing as an editable field — a proxy-enabled template doesn't need one (RStudio has none). `strip_prefix` only matters when `proxy_enabled` is set (see "the reverse proxy" above). `public_service` is independent of `proxy_enabled` — set it to `false` either for a proxied app with no auth of its own (Aether's login becomes the only way in, e.g. RStudio), or for a plain internal-only service consumed from inside the cluster (e.g. an LLM engine other in-cluster tooling talks to directly, with no browser login to bypass and no proxy involved at all).
 - `DELETE /api/templates/{id}` *(admin)* — delete a template
 - `POST /api/deployments` — creates a `Deployment` in the watched namespace (labeled `aether.io/owner: <your username>`), and if `container_port` is set, also a Service exposing it — `LoadBalancer` (public, MetalLB-assigned external IP) if `public_service` is true (the default), `ClusterIP`-only otherwise. Body: `{name, image, replicas, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, container_port, env, args, generate_secret_for, enable_proxy, strip_prefix, public_service}` — everything except `name`/`image`/`replicas` is optional (`public_service` defaults to `true` if omitted); `env` is `[[key, value], ...]` pairs (entries with an empty value are dropped, so an image's own default behavior — e.g. an auto-generated password logged at startup — still applies unless you set one); `args` is a list of container command-line arguments (any occurrence of the literal string `{{name}}` is substituted with the deployment's own name first); `generate_secret_for`, if set to an env var name, generates a random value for it (overriding anything with that key in `env`) and stores it in `deployment_secrets`; `enable_proxy`, if `true`, requires `container_port` to be set (400 otherwise) and makes the app also reachable via `GET/POST/... /proxy/<name>/...`, with `strip_prefix` controlling how that route forwards paths (see "the reverse proxy" above); `public_service`, independent of `enable_proxy`, controls whether the Service is a public `LoadBalancer` or `ClusterIP`-only. Response adds `service_name`/`container_port` (both `null` if no port was given), `secret_value` (the generated value, or `null`), `proxy_path` (`"/proxy/<name>/"` if `enable_proxy` was set, else `null`), and `public_service` (echoes the request, so the frontend knows whether to mention an external IP).
+- `GET /api/deployments/{name}` — current editable state of a Deployment you own (or, for an admin, any Deployment): `{name, replicas, cpu_request, cpu_limit, memory_request, memory_limit, env, generated_secret_key}`. `env` excludes the auto-generated secret's entry, if any — its key is reported separately as `generated_secret_key` rather than its (regeneratable) value, since it's shown read-only rather than as an editable row. 403 if you don't own it, 404 if it doesn't exist. Backs the Pods tab's manage panel.
+- `PUT /api/deployments/{name}` — scales and/or updates resources/env on a Deployment you own (or, for an admin, any Deployment). Body: `{replicas, cpu_request, cpu_limit, memory_request, memory_limit, env}`. Image, container port, accelerator, and args are fixed at launch time — changing those is a delete + relaunch, not an edit. An existing auto-generated secret's env var is carried through untouched regardless of what's submitted in `env` — edits never regenerate or require resubmitting it, since a client may already be using that value. Same validation as create (quantities, env keys, non-negative replicas). Returns the same shape as `GET`.
+- `DELETE /api/deployments/{name}` — deletes a Deployment you own (or, for an admin, any Deployment), its Service if it has one, and its `deployment_secrets` row (if any) — the one place in the app that actually cleans up a generated credential rather than leaving it to outlive the deployment that used it. 403 if you don't own it.
 - `ANY /proxy/{deployment_name}`, `ANY /proxy/{deployment_name}/`, `ANY /proxy/{deployment_name}/{*rest}` — reverse-proxies into a proxy-enabled deployment's pod (`backend/src/proxy.rs`), injecting its generated credential (if any) as the appropriate auth header so there's no login prompt. The first two (bare path / trailing slash, no further segment) are what every "Open" link actually points at; the wildcard one handles everything else the app itself requests once loaded. 403 if you're not that deployment's owner (or an admin); 400 if the deployment isn't proxy-enabled; 502 if the connection to its pod fails or times out (5s). Handles WebSocket upgrades transparently (needed for JupyterLab's kernel connections). See "Ownership, auto-generated credentials, and the reverse proxy" below.
 - `GET /api/pods/{name}/logs?container=&tail_lines=&previous=` — plain-text container logs (`container` defaults to the pod's only container if it has one; `tail_lines` defaults to 500; `previous=true` gets the last terminated instance's logs, for a crashed container)
 - `GET /api/pods/{name}/events` — JSON list of Kubernetes Events involving that pod (`type_`, `reason`, `message`, `count`, `last_seen`), most recent first — note the apiserver's default Event TTL is short (commonly ~1h), so older pods often have none left
@@ -370,6 +375,37 @@ Each proxied HTTP request currently opens a fresh TCP connection and
 HTTP/1.1 handshake to the pod rather than reusing a pooled connection —
 correct and simple, but adds latency per request; pooling is a reasonable
 future optimization, not a correctness issue.
+
+## Managing running deployments
+
+The Pods tab's detail panel (click any pod row) shows a **Manage** section
+for any pod that has a `deployment_name` — i.e. anything launched through
+Aether (or carrying an `app` label some other way). It lets you scale
+replicas, adjust CPU/memory requests and limits, edit environment
+variables, and delete the Deployment (plus its Service, if any) entirely.
+Image, container port, accelerator, and args are intentionally not
+editable here — changing any of those is a delete + relaunch through the
+Launch tab, not an in-place edit.
+
+Authorization is enforced backend-side against the Deployment's own
+`aether.io/owner` label (`backend/src/deployments.rs::check_owner`), not
+trusted from what the frontend happens to show: an admin can manage any
+Deployment, everyone else only their own. In practice a `user`-role account
+never even sees a pod it doesn't own to begin with (`visibility.rs`
+filters `GET /api/pods` per-role already), so the frontend doesn't
+separately re-check ownership before rendering the Manage section — it
+just renders whenever `deployment_name` is present, and the backend is the
+actual gate for admins looking at someone else's pod.
+
+If the Deployment has an auto-generated credential (`secret_env_key` on
+its template), its env var is shown as a read-only note rather than an
+editable row, and edits never regenerate or resend it — the backend always
+carries the existing stored value through untouched, since resubmitting a
+placeholder or omitting it entirely would otherwise silently invalidate a
+value someone might already be using. Deleting a Deployment does finally
+clean up its `deployment_secrets` row, though — this is the one place a
+generated credential doesn't just outlive the workload it was made for
+(see "Known limitations" below for the general case).
 
 ## Activity logging
 
@@ -744,7 +780,18 @@ form. The theme toggle was confirmed via Puppeteer: default is dark,
 toggling flips `data-theme` and the rendered background color to the
 validated light-mode step, the choice persists in `localStorage` across a
 reload, and both states were screenshotted to check for layout/contrast
-issues. Known gaps, in case they matter for what you do next:
+issues. Deployment lifecycle management (scale/edit/delete from the Pods
+tab, see "Managing running deployments" above) was verified against the
+real cluster: ownership enforcement in every direction (owner, a
+non-owning `user`, and admin, tested against `GET`/`PUT`/`DELETE` all
+three), a scale+resource+env edit confirmed via `kubectl` to have actually
+changed the live Deployment, an auto-generated secret's env var confirmed
+byte-for-byte unchanged after an edit that didn't mention it, delete
+confirmed to remove the Deployment, its Service, and its
+`deployment_secrets` row, and a full Puppeteer pass as a `user`-role
+account editing and then deleting a real deployment through the actual
+Pods tab UI (including handling the native `confirm()` dialog). Known
+gaps, in case they matter for what you do next:
 
 - **Still no "forgot password" self-service flow** — that requires emailing
   a reset link, which this app has no mechanism for (no SMTP config, no
@@ -786,16 +833,23 @@ issues. Known gaps, in case they matter for what you do next:
 - **Single namespace only**, fixed at deploy time via the pod's own
   namespace. No in-app namespace switcher; watching multiple namespaces
   means deploying multiple copies (see "Watching a different namespace").
-- **No way to scale, delete, or edit a Deployment/Service from the UI** —
-  only create. Same for pods: no delete/restart action, view-only plus logs.
+- **Deployment management covers scale/edit/delete, not everything** — see
+  "Managing running deployments" above. Still no way to hand-edit a
+  Service, no pod-level delete/restart independent of its Deployment
+  (scale to 0 and back up instead), and no rollout-history/rollback view —
+  a bad edit just needs manually editing it back, same as `kubectl`.
 - **`VLLM_API_KEY` is an educated guess, not a confirmed env var name** — it
   hasn't been verified against a real vLLM server run (see the vLLM
   templates gap above). If vLLM ignores it, the generated value shown in the
   UI simply won't do anything.
 - **Auto-generated credentials are plaintext in Postgres**, not a Kubernetes
-  `Secret` or any encrypted store, and persist after the pod that used them
-  is gone (no cleanup job) — anyone with `deployment_secrets` table access
-  can read every credential ever generated, past or present.
+  `Secret` or any encrypted store, and anyone with `deployment_secrets`
+  table access can read every credential ever generated, past or present.
+  Explicitly deleting a Deployment through the Pods tab's manage panel does
+  clean up its row, but a credential still outlives its Deployment if that
+  Deployment is instead removed some other way (directly via `kubectl`,
+  e.g.) — there's no reconciliation loop that notices and cleans up after
+  the fact.
 - **JupyterLab and RStudio get true JupyterHub-style transparent auth**
   (reverse proxy + injected credential or, for RStudio, no auth at all —
   click "Open" and you're in). vLLM still just displays a credential for
