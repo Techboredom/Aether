@@ -8,6 +8,7 @@ mod images_tab;
 mod login;
 mod pod_detail;
 mod pods_tab;
+mod quotas_tab;
 mod templates_tab;
 mod theme;
 mod users_tab;
@@ -23,6 +24,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use login::LoginPage;
 use pods_tab::PodsTab;
+use quotas_tab::QuotasTab;
 use templates_tab::TemplatesTab;
 use users_tab::UsersTab;
 
@@ -39,6 +41,7 @@ enum Tab {
     Templates,
     Images,
     Users,
+    Quotas,
 }
 
 #[component]
@@ -132,6 +135,13 @@ fn AppShell(user: UserInfo, current_user: RwSignal<Option<UserInfo>>, theme: RwS
                         >
                             "Users"
                         </button>
+                        <button
+                            class="tab-button"
+                            class:active=move || tab.get() == Tab::Quotas
+                            on:click=move |_| tab.set(Tab::Quotas)
+                        >
+                            "Quotas"
+                        </button>
                     </Show>
                 </nav>
                 <div class="user-info">
@@ -173,6 +183,9 @@ fn AppShell(user: UserInfo, current_user: RwSignal<Option<UserInfo>>, theme: RwS
                 </div>
                 <div class:hidden=move || tab.get() != Tab::Users>
                     <UsersTab />
+                </div>
+                <div class:hidden=move || tab.get() != Tab::Quotas>
+                    <QuotasTab />
                 </div>
             </Show>
         </main>

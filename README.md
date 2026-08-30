@@ -87,9 +87,11 @@ backend/src/validate.rs    Input validation (k8s names, ports, quantities, env k
 backend/src/visibility.rs  Per-user pod filtering + credential/proxy-path enrichment (admin sees all, user sees own)
 backend/src/proxy.rs       Reverse proxy for proxy-enabled templates (JupyterLab) — ClusterIP connection + credential injection
 backend/src/deployments.rs Create/get/update/delete a Deployment, ownership checks, launch history
+backend/src/quota.rs       Global/per-user quota settings + enforcement, usage computed from the pod watcher's cache
 frontend/src/login.rs      Login page
 frontend/src/pods_tab.rs   Pods tab + detail panel
 frontend/src/deployment_manage.rs  Scale/edit/delete panel for a Deployment, shown in the pod detail panel
+frontend/src/quotas_tab.rs Quotas admin tab (global defaults + per-user overrides)
 frontend/src/create_deployment_tab.rs   Launch tab (template dropdown + form)
 frontend/src/templates_tab.rs   Templates admin tab (CRUD)
 frontend/src/images_tab.rs      Images admin tab (CRUD, backs "Custom" mode on Launch)
@@ -182,6 +184,10 @@ additionally require the `admin` role (403 otherwise).
 - `ANY /proxy/{deployment_name}`, `ANY /proxy/{deployment_name}/`, `ANY /proxy/{deployment_name}/{*rest}` — reverse-proxies into a proxy-enabled deployment's pod (`backend/src/proxy.rs`), injecting its generated credential (if any) as the appropriate auth header so there's no login prompt. The first two (bare path / trailing slash, no further segment) are what every "Open" link actually points at; the wildcard one handles everything else the app itself requests once loaded. 403 if you're not that deployment's owner (or an admin); 400 if the deployment isn't proxy-enabled; 502 if the connection to its pod fails or times out (5s). Handles WebSocket upgrades transparently (needed for JupyterLab's kernel connections). See "Ownership, auto-generated credentials, and the reverse proxy" below.
 - `GET /api/pods/{name}/logs?container=&tail_lines=&previous=` — plain-text container logs (`container` defaults to the pod's only container if it has one; `tail_lines` defaults to 500; `previous=true` gets the last terminated instance's logs, for a crashed container)
 - `GET /api/pods/{name}/events` — JSON list of Kubernetes Events involving that pod (`type_`, `reason`, `message`, `count`, `last_seen`), most recent first — note the apiserver's default Event TTL is short (commonly ~1h), so older pods often have none left
+- `GET /api/quota/me` — the caller's own effective quota (their `user_quotas` override if they have one, else the global default), current usage, and `expose_resource_requests`. Always unlimited limits for an admin (exempt from enforcement), though `expose_resource_requests` still applies to everyone. Backs the Launch tab and the Pods tab's manage panel.
+- `GET /api/quota/settings` / `PUT /api/quota/settings` *(admin for PUT; GET requires only login)* — the global default quota: `{cpu_limit, memory_limit, gpu_limit, expose_resource_requests}`. The three limit fields are quantity strings (`cpu_limit`/`memory_limit`, e.g. `"4"`/`"16Gi"`) or a plain integer (`gpu_limit`) — `null`/omitted means unlimited for that dimension.
+- `GET /api/quota/users` *(admin)* — every account's `{user_id, username, quota_override, used_cpu_millicores, used_memory_bytes, used_gpu_count}` — `quota_override` is `null` if that user has no override and is bound by the global default. Backs the Quotas admin tab's table.
+- `PUT /api/quota/users/{id}` *(admin)* — sets (or replaces) a user's quota override, same `{cpu_limit, memory_limit, gpu_limit}` shape as the global settings' limits. `DELETE /api/quota/users/{id}` *(admin)* clears it, reverting that user to the global default.
 - `GET /*` — serves the built frontend (`index.html`, JS, WASM, CSS)
 
 ## Image and template catalogs (Postgres)
@@ -406,6 +412,48 @@ value someone might already be using. Deleting a Deployment does finally
 clean up its `deployment_secrets` row, though — this is the one place a
 generated credential doesn't just outlive the workload it was made for
 (see "Known limitations" below for the general case).
+
+## User quotas
+
+A single user could otherwise launch enough replicas/resources to occupy
+the entire shared cluster. The **Quotas** admin tab sets a cluster-wide
+default (CPU limit in cores, memory limit, GPU count — any left blank
+means unlimited for that dimension) plus optional per-user overrides; an
+override fully replaces the global default for that user across all three
+dimensions, rather than overriding just one field at a time. Enforced in
+`backend/src/quota.rs::check_quota`, called from both
+`create_deployment` and `update_deployment` before either ever touches the
+cluster — a launch or edit that would push the *owning user's* total over
+their effective quota gets rejected with 400 and a message naming the
+exceeded dimension and the numbers involved. **Admins are exempt** —
+quotas exist to stop a `user` account from monopolizing shared capacity;
+an admin already has unrestricted cluster access via their own kubeconfig
+regardless of what Aether enforces.
+
+Quota is checked against resource **limits**, not requests — interactive
+workloads are bursty, so it's peak usage that risks starving other users,
+not steady-state reservation. Usage itself is summed live from the pod
+watcher's own in-memory cache (`PodInfo::cpu_limit_millicores`/
+`memory_limit_bytes`/`accelerators`, already computed for the Pods tab) —
+no separate accounting table, and no new Kubernetes RBAC verbs were needed
+to compute it. GPU quota is a single aggregate count regardless of
+accelerator vendor/type (`nvidia.com/gpu`, `amd.com/gpu`, ... all count
+toward the same limit) — simplest, and this cluster currently only has
+AMD GPUs anyway.
+
+A separate global toggle, **`expose_resource_requests`**, controls whether
+the Launch tab and the Pods tab's manage panel show CPU/memory *request*
+fields at all, independent of the quota limits themselves. With it off,
+only limits are shown or ever sent to the backend — Kubernetes itself then
+defaults a container's request to match its limit when a limit is given
+with no request, so nothing needs to be filled in on the server side to
+compensate. This is deliberately just a display/input setting, not a
+quota dimension of its own.
+
+Scaling or editing an existing deployment excludes *that deployment's own*
+current usage from the baseline before adding its proposed new footprint,
+so raising its own replica count or limits is judged only against what it
+would become, not double-counted against what it already is.
 
 ## Activity logging
 
@@ -790,8 +838,20 @@ byte-for-byte unchanged after an edit that didn't mention it, delete
 confirmed to remove the Deployment, its Service, and its
 `deployment_secrets` row, and a full Puppeteer pass as a `user`-role
 account editing and then deleting a real deployment through the actual
-Pods tab UI (including handling the native `confirm()` dialog). Known
-gaps, in case they matter for what you do next:
+Pods tab UI (including handling the native `confirm()` dialog). User
+quotas were verified end-to-end against the real cluster: CPU, memory, and
+GPU rejections all confirmed with the exact math checked (e.g. a launch
+correctly rejected once existing usage plus its own footprint exceeded the
+limit, with the error message's numbers matching by hand), a per-user
+override confirmed to both raise a limit and, once cleared, correctly
+revert that user to the global default, admin exemption confirmed by
+launching wildly over-limit resources as admin with no rejection, the
+scale/edit path's exclude-self accounting confirmed correct via exact
+arithmetic on a real scale-up attempt, and a full Puppeteer pass covering
+the Launch tab's quota summary display, the request-fields toggle actually
+hiding/showing the right inputs after being flipped from the Quotas admin
+tab, and the per-user usage table rendering real numbers. Known gaps, in
+case they matter for what you do next:
 
 - **Still no "forgot password" self-service flow** — that requires emailing
   a reset link, which this app has no mechanism for (no SMTP config, no
@@ -801,6 +861,16 @@ gaps, in case they matter for what you do next:
 - **No login rate limiting.** `POST /api/login` has no lockout/backoff, so
   nothing but password strength (≥ 8 chars, enforced at creation) stands
   between an attacker and password guessing.
+- **Quotas aren't retroactive.** Lowering a user's limit (or the global
+  default) below what they're already running doesn't touch existing
+  deployments — enforcement only ever blocks a *new* launch or edit from
+  pushing usage over the limit, never reaches back to shrink or kill
+  something already running.
+- **Quota usage only counts pods Aether can attribute to an owner.** A
+  Deployment created some other way (raw `kubectl apply`, no
+  `aether.io/owner` label) doesn't count against anyone's usage and can't
+  be blocked by this mechanism at all — quotas only govern what's launched
+  through Aether itself.
 - **This is a scoped-down slice of `SPEC.md`, not the whole thing.** No
   ingress controller and no StorageClass exist in this cluster yet, so
   there's no Gateway layer and no persistent storage — launched apps

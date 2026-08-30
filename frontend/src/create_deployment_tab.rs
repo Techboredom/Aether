@@ -1,10 +1,11 @@
-use common::{CreateDeploymentRequest, CreateDeploymentResponse, ImageEntry, TemplateEntry};
+use common::{CreateDeploymentRequest, CreateDeploymentResponse, ImageEntry, MyQuota, TemplateEntry};
 use gloo_net::http::Request;
 use leptos::prelude::*;
 use leptos::tachys::dom::event_target_value;
 use leptos::task::spawn_local;
 
 use crate::env_editor::{EnvVars, EnvVarsEditor};
+use crate::format::quota_summary;
 
 /// A successful launch's (message, proxy_path) pair.
 type LaunchResult = Result<(String, Option<String>), String>;
@@ -39,6 +40,21 @@ pub fn CreateDeploymentTab() -> impl IntoView {
 
     let submitting = RwSignal::new(false);
     let result: RwSignal<Option<LaunchResult>> = RwSignal::new(None);
+
+    let my_quota: RwSignal<Option<MyQuota>> = RwSignal::new(None);
+    // Defaults to showing request fields until the real setting loads, so
+    // the form doesn't flash from "with requests" to "without" on a slow
+    // connection - matches this app's existing behavior before quotas
+    // existed.
+    let expose_requests = move || my_quota.get().map(|q| q.expose_resource_requests).unwrap_or(true);
+
+    spawn_local(async move {
+        if let Ok(resp) = Request::get("/api/quota/me").send().await
+            && resp.ok()
+                && let Ok(quota) = resp.json::<MyQuota>().await {
+                    my_quota.set(Some(quota));
+                }
+    });
 
     spawn_local(async move {
         match Request::get("/api/images").send().await {
@@ -137,9 +153,9 @@ pub fn CreateDeploymentTab() -> impl IntoView {
             template_name: selected_template_name.get(),
             image: image.get(),
             replicas: replicas.get().trim().parse().unwrap_or(1),
-            cpu_request: non_empty(cpu_request.get()),
+            cpu_request: if expose_requests() { non_empty(cpu_request.get()) } else { None },
             cpu_limit: non_empty(cpu_limit.get()),
-            memory_request: non_empty(memory_request.get()),
+            memory_request: if expose_requests() { non_empty(memory_request.get()) } else { None },
             memory_limit: non_empty(memory_limit.get()),
             accelerator_type: if accel_type.is_empty() { None } else { Some(accel_type) },
             accelerator_count: accel_count,
@@ -265,17 +281,23 @@ pub fn CreateDeploymentTab() -> impl IntoView {
                     />
                 </label>
 
+                {move || {
+                    my_quota.get().map(|q| view! { <div class="template-notes">{quota_summary(&q)}</div> })
+                }}
+
                 <fieldset>
                     <legend>"CPU"</legend>
-                    <label>
-                        "Request"
-                        <input
-                            type="text"
-                            placeholder="e.g. 250m"
-                            prop:value=move || cpu_request.get()
-                            on:input=move |ev| cpu_request.set(event_target_value(&ev))
-                        />
-                    </label>
+                    <Show when=expose_requests>
+                        <label>
+                            "Request"
+                            <input
+                                type="text"
+                                placeholder="e.g. 250m"
+                                prop:value=move || cpu_request.get()
+                                on:input=move |ev| cpu_request.set(event_target_value(&ev))
+                            />
+                        </label>
+                    </Show>
                     <label>
                         "Limit"
                         <input
@@ -289,15 +311,17 @@ pub fn CreateDeploymentTab() -> impl IntoView {
 
                 <fieldset>
                     <legend>"Memory"</legend>
-                    <label>
-                        "Request"
-                        <input
-                            type="text"
-                            placeholder="e.g. 256Mi"
-                            prop:value=move || memory_request.get()
-                            on:input=move |ev| memory_request.set(event_target_value(&ev))
-                        />
-                    </label>
+                    <Show when=expose_requests>
+                        <label>
+                            "Request"
+                            <input
+                                type="text"
+                                placeholder="e.g. 256Mi"
+                                prop:value=move || memory_request.get()
+                                on:input=move |ev| memory_request.set(event_target_value(&ev))
+                            />
+                        </label>
+                    </Show>
                     <label>
                         "Limit"
                         <input
