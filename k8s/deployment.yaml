@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: aether
-  namespace: ollama
+  namespace: aether
   labels:
     app: aether
 spec:
@@ -40,7 +40,7 @@ spec:
                   fieldPath: metadata.namespace
             # Postgres connection string for the image catalog. Create this
             # secret yourself, e.g.:
-            #   kubectl create secret generic aether-db -n ollama \
+            #   kubectl create secret generic aether-db -n aether \
             #     --from-literal=DATABASE_URL='postgres://user:pass@host:5432/dbname'
             - name: DATABASE_URL
               valueFrom:

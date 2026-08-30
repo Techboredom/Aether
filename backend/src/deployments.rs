@@ -54,9 +54,6 @@ pub async fn create_deployment(
     if req.enable_proxy && req.container_port.is_none() {
         return Err(ApiError::BadRequest("enable_proxy requires container_port".into()));
     }
-    if !req.public_service && !req.enable_proxy {
-        return Err(ApiError::BadRequest("public_service can only be false when enable_proxy is set — otherwise the app would be unreachable".into()));
-    }
 
     let mut requests = BTreeMap::new();
     let mut limits = BTreeMap::new();
@@ -161,11 +158,16 @@ pub async fn create_deployment(
 
     // No ingress controller in the cluster yet, so expose the app directly via
     // its own Service — `LoadBalancer` (MetalLB assigns it an external IP) by
-    // default, or `ClusterIP`-only when `public_service` is false, which is
-    // required for apps with no auth of their own (Aether's own login is
-    // then the only gate). Created regardless of `enable_proxy`, since
-    // Aether's own /proxy/ route (backend/src/proxy.rs) reaches proxy-enabled
-    // deployments through this same Service's in-cluster ClusterIP either way.
+    // default, or `ClusterIP`-only when `public_service` is false. That's
+    // required for apps with no auth of their own that rely on Aether's own
+    // login as the gate (JupyterLab, RStudio), but it's also a valid, useful
+    // choice on its own for templates with no proxy at all (Ollama/vLLM/
+    // SGLang set to "internal") — cluster-internal callers (e.g. a coding
+    // tool running as another pod) can still reach a ClusterIP directly, it
+    // just isn't exposed outside the cluster. Created regardless of
+    // `enable_proxy`, since Aether's own /proxy/ route (backend/src/proxy.rs)
+    // reaches proxy-enabled deployments through this same Service's
+    // in-cluster ClusterIP either way.
     let mut service_name = None;
     if let Some(port) = req.container_port {
         let service_type = if req.public_service { "LoadBalancer" } else { "ClusterIP" };

@@ -176,8 +176,5 @@ fn validate_request(req: &SaveTemplateRequest) -> Result<(), ApiError> {
     if let Some(key) = &req.secret_env_key {
         validate::env_key(key)?;
     }
-    if !req.public_service && !req.proxy_enabled {
-        return Err(ApiError::BadRequest("public_service can only be false when proxy_enabled is set — otherwise the app would be unreachable".to_string()));
-    }
     Ok(())
 }

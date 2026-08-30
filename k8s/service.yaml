@@ -2,7 +2,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: aether
-  namespace: ollama
+  namespace: aether
   labels:
     app: aether
 spec:
