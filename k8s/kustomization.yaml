@@ -6,3 +6,11 @@ resources:
   - rbac.yaml
   - deployment.yaml
   - service.yaml
+
+# CI rewrites just the tag here (`kustomize edit set image
+# ctr.int.example.com:8443/aether:<sha>`) after each build, so Argo CD
+# picks up a new commit — and therefore a new image — without anyone
+# hand-editing deployment.yaml.
+images:
+  - name: ctr.int.example.com:8443/aether
+    newTag: latest

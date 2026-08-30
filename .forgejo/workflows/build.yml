@@ -3,6 +3,10 @@ name: build-and-push
 on:
   push:
     branches: [main]
+    # k8s/ changes never affect the image (not part of the Docker build
+    # context) — this also stops the bot commit below from re-triggering
+    # a build (it only ever touches k8s/kustomization.yaml).
+    paths-ignore: ["k8s/**"]
     tags: ["v*"]
   workflow_dispatch: {}
 
@@ -33,3 +37,27 @@ jobs:
       - name: Log out
         if: always()
         run: docker logout "$REGISTRY"
+
+      # GitOps deploy: Argo CD (see argocd/application.yaml) watches k8s/ on
+      # main and auto-syncs the cluster whenever it changes. This job never
+      # touches the cluster itself — it only bumps the image tag here and
+      # pushes the commit; Argo CD does the actual deploy from inside the
+      # cluster. Requires a `FORGEJO_DEPLOY_TOKEN` Actions secret (an access
+      # token with write access to this repo's contents).
+      - name: Bump deployed image tag
+        run: |
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          KUSTOMIZE="$PWD/kustomize"
+          (cd k8s && "$KUSTOMIZE" edit set image "$IMAGE=$IMAGE:$TAG")
+          rm -f "$KUSTOMIZE"
+
+          if git diff --quiet -- k8s/kustomization.yaml; then
+            echo "k8s/kustomization.yaml unchanged, nothing to deploy"
+            exit 0
+          fi
+
+          git config user.name "aether-ci"
+          git config user.email "ci@example.com"
+          git add k8s/kustomization.yaml
+          git commit -m "deploy: bump aether image to $TAG"
+          git push "https://aether-ci:${{ secrets.FORGEJO_DEPLOY_TOKEN }}@git.example.com/Aether/Aether-Web.git" HEAD:main

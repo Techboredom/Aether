@@ -372,24 +372,38 @@ no shell, runs as a non-root user.
 ## CI (Forgejo Actions)
 
 `.forgejo/workflows/build.yml` builds and pushes the image to
-`ctr.int.example.com:8443/aether` on every push to `main`, on version tags
-(`v*`), or via manual dispatch. It tags the image with both the short git SHA
-and `latest`.
+`ctr.int.example.com:8443/aether` on every push to `main` (except
+commits that only touch `k8s/**` — see below), on version tags (`v*`), or
+via manual dispatch. It tags the image with both the short git SHA and
+`latest`.
 
-Requires two repository secrets in Forgejo (Settings → Actions → Secrets):
+After a successful push, the same job also bumps the deploy: it downloads
+`kustomize`, runs `kustomize edit set image ...` inside `k8s/` to point
+`k8s/kustomization.yaml` at the new SHA-tagged image, and — if that actually
+changed anything — commits and pushes that one file straight to `main`. That
+commit only touches `k8s/kustomization.yaml`, which is exactly what the
+`paths-ignore: ["k8s/**"]` trigger filter exists to catch, so it doesn't
+loop back into another build. Argo CD (see "GitOps deploy" below) is what
+actually notices that commit and rolls the cluster forward — this job never
+touches the cluster itself, only the registry and its own git repo.
 
-- `REGISTRY_USER`
-- `REGISTRY_PASSWORD`
+Requires three repository secrets in Forgejo (Settings → Actions → Secrets):
+
+- `REGISTRY_USER` / `REGISTRY_PASSWORD` — container registry push access.
+- `FORGEJO_DEPLOY_TOKEN` — an access token with write access to this repo's
+  contents, used only to push the image-tag-bump commit above.
 
 The runner must be labeled `docker` (matching `runs-on: docker` in the
 workflow) and have Docker available.
 
 ## Deploying to Kubernetes
 
-Manifests live in `k8s/` and deploy into the `aether` namespace (the app
-always watches its own namespace, via the pod's `metadata.namespace`, so
-watched namespace = deployed namespace). They're pinned to `amd64` nodes via
-`nodeSelector`, since the image is amd64-only.
+**This is now handled by Argo CD (see "GitOps deploy" below) — the steps
+here are the one-time bootstrap that got it there, not something to repeat
+on every change.** Manifests live in `k8s/` and deploy into the `aether`
+namespace (the app always watches its own namespace, via the pod's
+`metadata.namespace`, so watched namespace = deployed namespace). They're
+pinned to `amd64` nodes via `nodeSelector`, since the image is amd64-only.
 
 1. **Image pull secret** — the registry requires auth, so the cluster needs
    credentials to pull the image:
@@ -409,7 +423,9 @@ watched namespace = deployed namespace). They're pinned to `amd64` nodes via
      --from-literal=DATABASE_URL='postgres://user:pass@host:5432/dbname'
    ```
 
-3. **Apply the manifests:**
+3. **Apply the manifests** (one-time bootstrap only — after Argo CD's
+   `Application` exists, it owns this and re-running it by hand just fights
+   Argo CD's `selfHeal`):
 
    ```
    kubectl apply -k k8s/
@@ -446,6 +462,84 @@ To watch a namespace other than `aether`, either:
 - Deploy a second copy of `k8s/` with a different `namespace` and a distinct
   set of resource names, if you want multiple dashboards watching different
   namespaces at once.
+
+## GitOps deploy (Argo CD)
+
+Once code merges to `main` and CI pushes a new image, something still has to
+actually roll it out to the cluster. That's Argo CD's job, not CI's — CI
+never holds cluster credentials at all, only registry and git-repo access
+(see "CI" above). This was a deliberate choice over having CI run
+`kubectl apply` directly: it keeps the only thing with cluster-write access
+running *inside* the cluster itself, watching for changes, rather than
+handing that power to a build runner.
+
+**One-time bootstrap** (already done for this cluster; recorded here for
+rebuilding it elsewhere):
+
+1. Install Argo CD into its own `argocd` namespace using the standard
+   (non-HA) install manifests, then expose its UI the same way everything
+   else in this cluster is exposed — a `LoadBalancer` Service, since there's
+   no ingress controller:
+   ```
+   kubectl create namespace argocd
+   kubectl apply -n argocd --server-side --force-conflicts \
+     -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+   kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
+   ```
+   (`--server-side` matters here — plain `kubectl apply` fails on the
+   `applicationsets.argoproj.io` CRD with "annotations: Too long", since
+   client-side apply stuffs the whole manifest into a
+   `last-applied-configuration` annotation and this one's big enough to
+   exceed the 256KiB etcd field limit.) The initial admin password is
+   auto-generated: `kubectl -n argocd get secret
+   argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d`
+   — log in and change it.
+2. Trust this Forgejo host's SSH key (Argo CD ships known-hosts entries for
+   GitHub/GitLab/Bitbucket, not arbitrary self-hosted instances) and give it
+   a **read-only** deploy key for this repo:
+   ```
+   ssh-keyscan -p 2022 git.example.com
+   ```
+   merged into the `argocd-ssh-known-hosts-cm` ConfigMap's
+   `ssh_known_hosts` key (then `kubectl rollout restart deployment/argocd-repo-server -n argocd`
+   to pick it up). Generate a dedicated keypair (`ssh-keygen -t ed25519`),
+   add the *public* half as a read-only Deploy Key on the Forgejo repo, and
+   store the private half as a repository credential Argo CD reads directly:
+   ```
+   kubectl create secret generic aether-repo-creds -n argocd \
+     --from-literal=type=git \
+     --from-literal=url=ssh://git@git.example.com:2022/Aether/Aether-Web.git \
+     --from-file=sshPrivateKey=<path to private key>
+   kubectl label secret aether-repo-creds -n argocd argocd.argoproj.io/secret-type=repository
+   ```
+   Never commit the private key — it only ever exists as this in-cluster
+   Secret and a local temp file deleted right after.
+3. Apply the `Application` (`argocd/application.yaml`, kept outside `k8s/`
+   deliberately — Argo CD manages `k8s/`'s contents, it isn't one of the
+   things `k8s/` itself deploys):
+   ```
+   kubectl apply -f argocd/application.yaml
+   ```
+   It targets `path: k8s`, `targetRevision: main`, destination namespace
+   `aether`, with `syncPolicy.automated: {prune: true, selfHeal: true}` and
+   `CreateNamespace=true` — fully automatic from here on, no manual sync
+   button needed.
+
+**Steady-state loop** (this is the actual "build → deploy" pipeline): push
+to `main` → CI builds and pushes `ctr.int.example.com:8443/aether:<sha>`
+→ CI commits the new tag into `k8s/kustomization.yaml`'s `images:` override
+and pushes that to `main` → Argo CD's `Application` controller notices the
+new commit (polls every few minutes by default, or near-instantly with a
+Forgejo webhook configured later) and re-syncs, which rolls the `aether`
+Deployment to the new image. Check `kubectl get application aether -n
+argocd` for `Synced`/`Healthy` status, or the Argo CD UI.
+
+**Known limitation, same tradeoff every Argo CD install faces**: the
+standard install grants `argocd-application-controller` a cluster-scoped
+`ClusterRole` (it's built to manage any namespace), even though this
+particular `Application` only ever targets `aether`. Fine for now; a
+namespace-restricted install is a reasonable hardening step if Argo CD
+starts managing more than this one app.
 
 ## Security notes
 
