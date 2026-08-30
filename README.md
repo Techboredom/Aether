@@ -456,7 +456,7 @@ history.
 Requires three repository secrets in Forgejo (Settings → Actions → Secrets):
 
 - `REGISTRY_USER` / `REGISTRY_PASSWORD` — container registry push access.
-- `FORGEJO_DEPLOY_TOKEN` — an access token with write access to
+- `AETHER_DEPLOY_TOKEN` — an access token with write access to
   **Aether-Deploy's** contents (not this repo), used only to push the
   image-tag-bump commit above.
 
