@@ -1,6 +1,7 @@
 mod account;
 mod activity_tab;
 mod create_deployment_tab;
+mod deployment_manage;
 mod env_editor;
 mod format;
 mod images_tab;

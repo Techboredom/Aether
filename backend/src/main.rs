@@ -90,6 +90,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/templates", get(templates::list_templates).post(templates::create_template))
         .route("/api/templates/{id}", put(templates::update_template).delete(templates::delete_template))
         .route("/api/deployments", post(deployments::create_deployment))
+        .route(
+            "/api/deployments/{name}",
+            get(deployments::get_deployment).put(deployments::update_deployment).delete(deployments::delete_deployment),
+        )
         .route("/api/launches", get(deployments::list_launches))
         .route("/api/pods/{name}/logs", get(logs::get_pod_logs))
         .route("/api/pods/{name}/events", get(events::get_pod_events))

@@ -6,6 +6,8 @@ use leptos::prelude::*;
 use leptos::tachys::dom::{event_target_checked, event_target_value};
 use leptos::task::spawn_local;
 
+use crate::deployment_manage::ManageDeploymentSection;
+
 #[component]
 pub fn PodDetailPanel(
     pods: RwSignal<HashMap<String, PodInfo>>,
@@ -120,6 +122,14 @@ pub fn PodDetailPanel(
                                     </ul>
                                 </section>
                             }
+                        })
+                }}
+
+                {move || {
+                    pod.get()
+                        .and_then(|p| p.deployment_name.clone())
+                        .map(|deployment_name| {
+                            view! { <ManageDeploymentSection deployment_name=deployment_name selected=selected /> }
                         })
                 }}
 

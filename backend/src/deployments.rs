@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::Json;
-use common::{CreateDeploymentRequest, CreateDeploymentResponse, LaunchLogEntry, Role};
+use common::{CreateDeploymentRequest, CreateDeploymentResponse, DeploymentDetail, LaunchLogEntry, Role, UpdateDeploymentRequest};
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
     Container, EnvVar, PodSpec, PodTemplateSpec, ResourceRequirements, Service, ServicePort, ServiceSpec,
@@ -10,7 +10,7 @@ use k8s_openapi::api::core::v1::{
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use kube::api::{Api, PostParams};
+use kube::api::{Api, DeleteParams, PostParams};
 use sqlx::types::Json as SqlxJson;
 use sqlx::FromRow;
 
@@ -19,6 +19,22 @@ use crate::error::ApiError;
 use crate::resources::OWNER_LABEL;
 use crate::state::AppState;
 use crate::validate;
+
+/// Errors if `user` isn't allowed to manage `deployment` — an admin always
+/// is; anyone else only for a deployment carrying their own `OWNER_LABEL`.
+/// A deployment with no owner label at all (predates Aether, or wasn't
+/// launched through it) can only be managed by an admin.
+fn check_owner(deployment: &Deployment, user: &CurrentUser) -> Result<(), ApiError> {
+    if user.role == Role::Admin {
+        return Ok(());
+    }
+    let owner = deployment.metadata.labels.as_ref().and_then(|l| l.get(OWNER_LABEL));
+    if owner.map(|o| o.as_str()) == Some(user.username.as_str()) {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden("you don't own this deployment".to_string()))
+    }
+}
 
 pub async fn create_deployment(
     user: CurrentUser,
@@ -342,4 +358,209 @@ pub async fn list_launches(user: CurrentUser, State(state): State<AppState>) -> 
         .await?
     };
     Ok(Json(rows.into_iter().map(LaunchLogEntry::from).collect()))
+}
+
+/// The auto-generated secret's `(env_key, secret_value)` for a deployment, if
+/// its template generated one — looked up fresh rather than trusted from the
+/// request, since the actual value only ever lives in Postgres/the container.
+async fn generated_secret(pg: &sqlx::PgPool, deployment_name: &str) -> Result<Option<(String, String)>, ApiError> {
+    let row: Option<(Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT env_key, secret_value FROM deployment_secrets WHERE deployment_name = $1")
+            .bind(deployment_name)
+            .fetch_optional(pg)
+            .await?;
+    Ok(row.and_then(|(key, value)| key.zip(value)))
+}
+
+/// Current editable state of a Deployment the caller owns (or, for an admin,
+/// any Deployment) — backs the Pods tab's manage panel.
+pub async fn get_deployment(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<DeploymentDetail>, ApiError> {
+    let deployments: Api<Deployment> = Api::namespaced(state.client.clone(), &state.namespace);
+    let deployment = deployments.get(&name).await?;
+    check_owner(&deployment, &user)?;
+
+    let secret = generated_secret(&state.pg, &name).await?;
+    let secret_key = secret.as_ref().map(|(key, _)| key.clone());
+
+    let container = deployment
+        .spec
+        .as_ref()
+        .and_then(|s| s.template.spec.as_ref())
+        .and_then(|s| s.containers.first());
+    let resources = container.and_then(|c| c.resources.as_ref());
+    let quantity = |map: Option<&BTreeMap<String, Quantity>>, key: &str| {
+        map.and_then(|m| m.get(key)).map(|q| q.0.clone())
+    };
+
+    let env: Vec<(String, String)> = container
+        .and_then(|c| c.env.as_ref())
+        .map(|vars| {
+            vars.iter()
+                .filter(|v| Some(&v.name) != secret_key.as_ref())
+                .map(|v| (v.name.clone(), v.value.clone().unwrap_or_default()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(Json(DeploymentDetail {
+        name,
+        replicas: deployment.spec.as_ref().and_then(|s| s.replicas).unwrap_or(0),
+        cpu_request: quantity(resources.and_then(|r| r.requests.as_ref()), "cpu"),
+        cpu_limit: quantity(resources.and_then(|r| r.limits.as_ref()), "cpu"),
+        memory_request: quantity(resources.and_then(|r| r.requests.as_ref()), "memory"),
+        memory_limit: quantity(resources.and_then(|r| r.limits.as_ref()), "memory"),
+        env,
+        generated_secret_key: secret_key,
+    }))
+}
+
+/// Scales and/or updates resources/env on a Deployment the caller owns (or,
+/// for an admin, any Deployment). Image, container port, accelerator, and
+/// args are fixed at launch time — this only ever touches `spec.replicas`
+/// and the first container's `resources`/`env`.
+pub async fn update_deployment(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<UpdateDeploymentRequest>,
+) -> Result<Json<DeploymentDetail>, ApiError> {
+    if req.replicas < 0 {
+        return Err(ApiError::BadRequest("replicas must not be negative".into()));
+    }
+    for field in [
+        ("cpu_request", &req.cpu_request),
+        ("cpu_limit", &req.cpu_limit),
+        ("memory_request", &req.memory_request),
+        ("memory_limit", &req.memory_limit),
+    ] {
+        if let (name, Some(value)) = field {
+            validate::quantity(name, value)?;
+        }
+    }
+    for (key, _) in &req.env {
+        if !key.trim().is_empty() {
+            validate::env_key(key)?;
+        }
+    }
+    validate::bounded_list("env", &req.env.iter().map(|(_, v)| v.clone()).collect::<Vec<_>>(), 50, 4096)?;
+
+    let deployments: Api<Deployment> = Api::namespaced(state.client.clone(), &state.namespace);
+    let mut deployment = deployments.get(&name).await?;
+    check_owner(&deployment, &user)?;
+
+    // Never regenerate an existing secret on edit - that would silently
+    // invalidate a value a client may already be using. Just carry the
+    // current one through untouched.
+    let secret = generated_secret(&state.pg, &name).await?;
+
+    let mut requests = BTreeMap::new();
+    let mut limits = BTreeMap::new();
+    if let Some(v) = &req.cpu_request {
+        requests.insert("cpu".to_string(), Quantity(v.clone()));
+    }
+    if let Some(v) = &req.cpu_limit {
+        limits.insert("cpu".to_string(), Quantity(v.clone()));
+    }
+    if let Some(v) = &req.memory_request {
+        requests.insert("memory".to_string(), Quantity(v.clone()));
+    }
+    if let Some(v) = &req.memory_limit {
+        limits.insert("memory".to_string(), Quantity(v.clone()));
+    }
+    // Extended resources (accelerators) on the existing container, if any,
+    // are preserved below by starting from its current resources rather
+    // than building requests/limits from scratch.
+    if let Some(container) =
+        deployment.spec.as_mut().and_then(|s| s.template.spec.as_mut()).and_then(|s| s.containers.first())
+        && let Some(existing) = &container.resources
+    {
+        for (map, existing_map) in [(&mut requests, &existing.requests), (&mut limits, &existing.limits)] {
+            if let Some(existing_map) = existing_map {
+                for (key, qty) in existing_map {
+                    if key != "cpu" && key != "memory" {
+                        map.entry(key.clone()).or_insert_with(|| qty.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    let mut env: Vec<EnvVar> = req
+        .env
+        .iter()
+        .filter(|(key, value)| !value.trim().is_empty() && Some(key.as_str()) != secret.as_ref().map(|(k, _)| k.as_str()))
+        .map(|(name, value)| EnvVar {
+            name: name.clone(),
+            value: Some(value.clone()),
+            ..Default::default()
+        })
+        .collect();
+    if let Some((key, value)) = &secret {
+        env.push(EnvVar { name: key.clone(), value: Some(value.clone()), ..Default::default() });
+    }
+
+    if let Some(spec) = deployment.spec.as_mut() {
+        spec.replicas = Some(req.replicas);
+        if let Some(container) = spec.template.spec.as_mut().and_then(|s| s.containers.first_mut()) {
+            container.resources = Some(ResourceRequirements {
+                requests: (!requests.is_empty()).then_some(requests),
+                limits: (!limits.is_empty()).then_some(limits),
+                ..Default::default()
+            });
+            container.env = (!env.is_empty()).then_some(env);
+        }
+    }
+
+    let updated = deployments.replace(&name, &PostParams::default(), &deployment).await?;
+    let secret_key = secret.map(|(key, _)| key);
+    let out_container = updated.spec.as_ref().and_then(|s| s.template.spec.as_ref()).and_then(|s| s.containers.first());
+    let out_env: Vec<(String, String)> = out_container
+        .and_then(|c| c.env.as_ref())
+        .map(|vars| {
+            vars.iter()
+                .filter(|v| Some(&v.name) != secret_key.as_ref())
+                .map(|v| (v.name.clone(), v.value.clone().unwrap_or_default()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(Json(DeploymentDetail {
+        name,
+        replicas: updated.spec.as_ref().and_then(|s| s.replicas).unwrap_or(0),
+        cpu_request: req.cpu_request,
+        cpu_limit: req.cpu_limit,
+        memory_request: req.memory_request,
+        memory_limit: req.memory_limit,
+        env: out_env,
+        generated_secret_key: secret_key,
+    }))
+}
+
+/// Deletes a Deployment the caller owns (or, for an admin, any Deployment),
+/// along with its Service (if any) and stored credential/proxy metadata.
+pub async fn delete_deployment(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<(), ApiError> {
+    let deployments: Api<Deployment> = Api::namespaced(state.client.clone(), &state.namespace);
+    let deployment = deployments.get(&name).await?;
+    check_owner(&deployment, &user)?;
+
+    deployments.delete(&name, &DeleteParams::default()).await?;
+
+    let services: Api<Service> = Api::namespaced(state.client.clone(), &state.namespace);
+    if let Err(err) = services.delete(&name, &DeleteParams::default()).await {
+        // Not every deployment has a matching Service (no container_port).
+        if !matches!(&err, kube::Error::Api(ae) if ae.code == 404) {
+            return Err(err.into());
+        }
+    }
+
+    sqlx::query("DELETE FROM deployment_secrets WHERE deployment_name = $1").bind(&name).execute(&state.pg).await?;
+    Ok(())
 }
