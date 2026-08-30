@@ -80,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/logout", post(auth::logout))
         .route("/api/me", get(auth::me))
         .route("/api/me/password", put(auth::change_password))
+        .route("/api/sessions", get(auth::list_sessions))
         .route("/api/users", get(users::list_users).post(users::create_user))
         .route("/api/users/{id}", axum::routing::delete(users::delete_user))
         .route("/api/users/{id}/password", put(users::reset_password))
@@ -88,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/templates", get(templates::list_templates).post(templates::create_template))
         .route("/api/templates/{id}", put(templates::update_template).delete(templates::delete_template))
         .route("/api/deployments", post(deployments::create_deployment))
+        .route("/api/launches", get(deployments::list_launches))
         .route("/api/pods/{name}/logs", get(logs::get_pod_logs))
         .route("/api/pods/{name}/events", get(events::get_pod_events))
         .route("/ws", get(ws::ws_handler))
@@ -107,7 +109,9 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = args.bind_addr.parse()?;
     tracing::info!(%addr, namespace = %args.namespace, "starting server");
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    // `ConnectInfo` (used by auth::login to record a login's source IP in
+    // session_log) requires the connect-info-aware make-service.
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
 
     Ok(())
 }

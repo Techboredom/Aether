@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use axum::extract::State;
 use axum::Json;
-use common::{CreateDeploymentRequest, CreateDeploymentResponse};
+use common::{CreateDeploymentRequest, CreateDeploymentResponse, LaunchLogEntry, Role};
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
     Container, EnvVar, PodSpec, PodTemplateSpec, ResourceRequirements, Service, ServicePort, ServiceSpec,
@@ -11,6 +11,8 @@ use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{Api, PostParams};
+use sqlx::types::Json as SqlxJson;
+use sqlx::FromRow;
 
 use crate::auth::{generate_token, CurrentUser};
 use crate::error::ApiError;
@@ -103,6 +105,8 @@ pub async fn create_deployment(
         .map(|a| a.trim().replace("{{name}}", &req.name))
         .filter(|a| !a.is_empty())
         .collect();
+    // `args` gets moved into the Container below; keep a copy for launch_log.
+    let logged_args = args.clone();
 
     // The selector must stay a fixed, minimal set of labels the pod template
     // always carries; `owner` rides along as an extra descriptive label on
@@ -223,6 +227,43 @@ pub async fn create_deployment(
         .await?;
     }
 
+    // Kept for support/metrics ("who launched JupyterLab with what
+    // resources, who ran vLLM with what model") — an append-only record,
+    // unlike deployment_secrets which gets overwritten on re-launch. Any
+    // generated-secret value is redacted before this is ever written, since
+    // (unlike deployment_secrets) any logged-in user can see their own rows.
+    let logged_env: Vec<(String, String)> = req
+        .env
+        .iter()
+        .map(|(k, v)| {
+            if Some(k) == req.generate_secret_for.as_ref() { (k.clone(), "<generated>".to_string()) } else { (k.clone(), v.clone()) }
+        })
+        .collect();
+    sqlx::query(
+        "INSERT INTO launch_log \
+            (deployment_name, namespace, owner_username, template_name, image, replicas, \
+             cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, \
+             container_port, env, args) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+    )
+    .bind(&name)
+    .bind(&state.namespace)
+    .bind(&user.username)
+    .bind(&req.template_name)
+    .bind(&req.image)
+    .bind(req.replicas)
+    .bind(&req.cpu_request)
+    .bind(&req.cpu_limit)
+    .bind(&req.memory_request)
+    .bind(&req.memory_limit)
+    .bind(&req.accelerator_type)
+    .bind(req.accelerator_count)
+    .bind(req.container_port)
+    .bind(SqlxJson(&logged_env))
+    .bind(&logged_args)
+    .execute(&state.pg)
+    .await?;
+
     let proxy_path = req.enable_proxy.then(|| format!("/proxy/{name}/"));
 
     Ok(Json(CreateDeploymentResponse {
@@ -234,4 +275,71 @@ pub async fn create_deployment(
         proxy_path,
         public_service: req.public_service,
     }))
+}
+
+#[derive(FromRow)]
+struct LaunchLogRow {
+    username: String,
+    created_at: String,
+    deployment_name: String,
+    template_name: Option<String>,
+    image: String,
+    replicas: i32,
+    cpu_request: Option<String>,
+    cpu_limit: Option<String>,
+    memory_request: Option<String>,
+    memory_limit: Option<String>,
+    accelerator_type: Option<String>,
+    accelerator_count: Option<i64>,
+    container_port: Option<i32>,
+    env: SqlxJson<Vec<(String, String)>>,
+    args: Vec<String>,
+}
+
+impl From<LaunchLogRow> for LaunchLogEntry {
+    fn from(row: LaunchLogRow) -> Self {
+        LaunchLogEntry {
+            username: row.username,
+            created_at: row.created_at,
+            deployment_name: row.deployment_name,
+            template_name: row.template_name,
+            image: row.image,
+            replicas: row.replicas,
+            cpu_request: row.cpu_request,
+            cpu_limit: row.cpu_limit,
+            memory_request: row.memory_request,
+            memory_limit: row.memory_limit,
+            accelerator_type: row.accelerator_type,
+            accelerator_count: row.accelerator_count,
+            container_port: row.container_port,
+            env: row.env.0,
+            args: row.args,
+        }
+    }
+}
+
+/// Launch history: everyone's, for an admin; only your own, for a `user`
+/// account — same visibility split as the Pods tab and `auth::list_sessions`.
+pub async fn list_launches(user: CurrentUser, State(state): State<AppState>) -> Result<Json<Vec<LaunchLogEntry>>, ApiError> {
+    let rows: Vec<LaunchLogRow> = if user.role == Role::Admin {
+        sqlx::query_as(
+            "SELECT l.owner_username AS username, l.created_at::text, l.deployment_name, l.template_name, \
+                 l.image, l.replicas, l.cpu_request, l.cpu_limit, l.memory_request, l.memory_limit, \
+                 l.accelerator_type, l.accelerator_count, l.container_port, l.env, l.args \
+             FROM launch_log l ORDER BY l.created_at DESC LIMIT 200",
+        )
+        .fetch_all(&state.pg)
+        .await?
+    } else {
+        sqlx::query_as(
+            "SELECT l.owner_username AS username, l.created_at::text, l.deployment_name, l.template_name, \
+                 l.image, l.replicas, l.cpu_request, l.cpu_limit, l.memory_request, l.memory_limit, \
+                 l.accelerator_type, l.accelerator_count, l.container_port, l.env, l.args \
+             FROM launch_log l WHERE l.owner_username = $1 ORDER BY l.created_at DESC LIMIT 200",
+        )
+        .bind(&user.username)
+        .fetch_all(&state.pg)
+        .await?
+    };
+    Ok(Json(rows.into_iter().map(LaunchLogEntry::from).collect()))
 }

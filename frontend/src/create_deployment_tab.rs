@@ -17,6 +17,7 @@ pub fn CreateDeploymentTab() -> impl IntoView {
     let templates_error = RwSignal::new(None::<String>);
 
     let selected_template_id = RwSignal::new(String::new());
+    let selected_template_name = RwSignal::new(None::<String>);
 
     let name = RwSignal::new(String::new());
     let image = RwSignal::new(String::new());
@@ -62,6 +63,7 @@ pub fn CreateDeploymentTab() -> impl IntoView {
     });
 
     let apply_template = move |t: &TemplateEntry| {
+        selected_template_name.set(Some(t.name.clone()));
         notes.set(if t.notes.trim().is_empty() { None } else { Some(t.notes.clone()) });
         name.set(slugify(&t.name));
         image.set(t.image.clone());
@@ -84,6 +86,7 @@ pub fn CreateDeploymentTab() -> impl IntoView {
     };
 
     let reset_to_custom = move || {
+        selected_template_name.set(None);
         notes.set(None);
         name.set(String::new());
         image.set(String::new());
@@ -131,6 +134,7 @@ pub fn CreateDeploymentTab() -> impl IntoView {
 
         let req = CreateDeploymentRequest {
             name: name.get().trim().to_string(),
+            template_name: selected_template_name.get(),
             image: image.get(),
             replicas: replicas.get().trim().parse().unwrap_or(1),
             cpu_request: non_empty(cpu_request.get()),

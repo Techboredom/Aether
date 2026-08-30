@@ -50,6 +50,10 @@ Launch; only admins see Templates and Users.
   delete them, and reset any account's password without knowing the old one
   (forces that account to log in again everywhere, on every device). Still
   no self-service signup — an admin creates every account.
+- **Activity** — login history (when, from what IP/browser) and launch
+  history (what template/image/resources someone launched), kept for
+  support/metrics. Same visibility split as Pods: a `user` account sees only
+  its own rows, an `admin` sees everyone's with an added Username column.
 
 Any logged-in user (either role) can change their own password via
 **Change password** in the header, which does require the current one.
@@ -357,6 +361,56 @@ HTTP/1.1 handshake to the pod rather than reusing a pooled connection —
 correct and simple, but adds latency per request; pooling is a reasonable
 future optimization, not a correctness issue.
 
+## Activity logging
+
+Two append-only tables back the Activity tab, kept for support/metrics
+purposes ("when did this user last log in, from where" and "who launched
+JupyterLab with what resources") — separate from `sessions` and
+`deployment_secrets`, which get deleted/overwritten and are used only for
+live auth/proxy checks, not history:
+
+```sql
+CREATE TABLE session_log (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    ip_address TEXT,
+    user_agent TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE launch_log (
+    id SERIAL PRIMARY KEY,
+    deployment_name TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    owner_username TEXT NOT NULL,
+    template_name TEXT,        -- NULL for a Custom launch
+    image TEXT NOT NULL,
+    replicas INTEGER NOT NULL,
+    cpu_request TEXT, cpu_limit TEXT, memory_request TEXT, memory_limit TEXT,
+    accelerator_type TEXT, accelerator_count BIGINT,
+    container_port INTEGER,
+    env JSONB NOT NULL DEFAULT '[]',   -- [[key, value], ...] — see redaction note below
+    args TEXT[] NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+- `POST /api/login` records the login's source IP (`ConnectInfo`, real since
+  Aether's own frontend sits directly behind its LoadBalancer with no proxy
+  in front of itself — unrelated to the `/proxy/` routes above, which proxy
+  *to* other apps) and `User-Agent` header into `session_log`.
+- `POST /api/deployments` records the full launch request into `launch_log`
+  after a successful create — **except** any env value matching
+  `generate_secret_for`, which is replaced with the literal string
+  `"<generated>"` before it's ever written. This matters because, unlike
+  `deployment_secrets` (admin-adjacent, tied to a specific still-running
+  deployment), `launch_log` is visible to the launching user themselves
+  indefinitely — it must never carry a real credential.
+- `GET /api/sessions` / `GET /api/launches` — same visibility rule as Pods:
+  an `admin` gets every row (with a `username` field), a `user` account gets
+  a query that's already server-side filtered to just their own, not a
+  client-side-hidden subset of everyone's.
+
 ## Building the container image
 
 Cross-compiling for `linux/amd64` from an arm64 machine (e.g. Apple Silicon)
@@ -546,6 +600,10 @@ starts managing more than this one app.
   Users, Launch) and are unrelated to Kubernetes RBAC below, which gates
   what the backend's own ServiceAccount can do to the cluster regardless of
   which human is logged in.
+- Every login records its source IP and `User-Agent` into `session_log`
+  (see "Activity logging" above), visible to the account it belongs to and
+  to admins — a privacy/data-retention tradeoff worth knowing about if this
+  is ever used somewhere IP logging needs disclosure.
 
 **Input validation** (`backend/src/validate.rs`), applied to Launch, Templates,
 and Users requests server-side (the real boundary) and mirrored as HTML5

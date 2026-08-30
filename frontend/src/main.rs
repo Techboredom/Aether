@@ -1,4 +1,5 @@
 mod account;
+mod activity_tab;
 mod create_deployment_tab;
 mod env_editor;
 mod format;
@@ -10,6 +11,7 @@ mod users_tab;
 mod ws;
 
 use account::ChangePasswordPanel;
+use activity_tab::ActivityTab;
 use common::{Role, UserInfo};
 use create_deployment_tab::CreateDeploymentTab;
 use gloo_net::http::Request;
@@ -29,6 +31,7 @@ fn main() {
 enum Tab {
     Pods,
     Launch,
+    Activity,
     Templates,
     Users,
 }
@@ -94,6 +97,13 @@ fn AppShell(user: UserInfo, current_user: RwSignal<Option<UserInfo>>) -> impl In
                     >
                         "Launch"
                     </button>
+                    <button
+                        class="tab-button"
+                        class:active=move || tab.get() == Tab::Activity
+                        on:click=move |_| tab.set(Tab::Activity)
+                    >
+                        "Activity"
+                    </button>
                     <Show when=move || is_admin>
                         <button
                             class="tab-button"
@@ -131,6 +141,9 @@ fn AppShell(user: UserInfo, current_user: RwSignal<Option<UserInfo>>) -> impl In
             </div>
             <div class:hidden=move || tab.get() != Tab::Launch>
                 <CreateDeploymentTab />
+            </div>
+            <div class:hidden=move || tab.get() != Tab::Activity>
+                <ActivityTab is_admin=is_admin />
             </div>
             <Show when=move || is_admin>
                 <div class:hidden=move || tab.get() != Tab::Templates>
