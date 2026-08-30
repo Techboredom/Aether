@@ -418,8 +418,8 @@ via QEMU reliably crashes `rustc`, so build this on a native amd64 box — CI
 handles this (see below). If you're already on amd64:
 
 ```
-docker build -t <registry>/aether:latest .
-docker push <registry>/aether:latest
+docker build -t <registry>/aether/aether:latest .
+docker push <registry>/aether/aether:latest
 ```
 
 The image is a distroless (`gcr.io/distroless/cc-debian12:nonroot`) runtime
@@ -429,9 +429,11 @@ no shell, runs as a non-root user.
 ## CI (Forgejo Actions)
 
 `.forgejo/workflows/build.yml` builds and pushes the image to
-`ctr.int.example.com:8443/aether` on every push to `main`, on version
-tags (`v*`), or via manual dispatch. It tags the image with both the short
-git SHA and `latest`.
+`ctr.int.example.com:8443/aether/aether` (the `aether` project in
+Harbor, repository also named `aether` — deliberately not `aether-web` or
+`aether-app`, since there's only one image this whole project produces) on
+every push to `main`, on version tags (`v*`), or via manual dispatch. It
+tags the image with both the short git SHA and `latest`.
 
 After a successful push, the same job also bumps the deploy: it clones the
 separate **Aether-Deploy** repo (see "GitOps deploy" below — that's where
@@ -560,7 +562,7 @@ rebuilding it elsewhere):
 
 **Steady-state loop** (this is the actual "build → deploy" pipeline): push
 to this repo's `main` → CI builds and pushes
-`ctr.int.example.com:8443/aether:<sha>` → CI clones Aether-Deploy,
+`ctr.int.example.com:8443/aether/aether:<sha>` → CI clones Aether-Deploy,
 bumps its `kustomization.yaml`'s `images:` override to the new tag, and
 pushes that commit to Aether-Deploy's `main` → Argo CD's `Application`
 controller notices the new commit there (polls every few minutes by
