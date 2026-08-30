@@ -51,6 +51,14 @@ jobs:
       # is what actually rolls the new image out.
       - name: Bump image tag in Aether-Deploy
         run: |
+          # Forgejo injects its own GITHUB_TOKEN into every job for
+          # actions/* compatibility. install_kustomize.sh sends whatever
+          # GITHUB_TOKEN is set to api.github.com to look up the latest
+          # release; GitHub rejects our Forgejo token as "Bad credentials"
+          # and the script dies with "Invalid GITHUB_TOKEN" before
+          # kustomize is even downloaded. Unset it so the lookup goes
+          # through unauthenticated instead.
+          unset GITHUB_TOKEN
           curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
           KUSTOMIZE="$PWD/kustomize"
 
