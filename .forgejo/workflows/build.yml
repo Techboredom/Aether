@@ -21,7 +21,7 @@ jobs:
           # later needs to run authenticated git commands against it. Left
           # at the default (true), checkout persists its own auto-injected
           # credential (scoped only to this repo) into the job's git config,
-          # which then collides with the explicit FORGEJO_DEPLOY_TOKEN the
+          # which then collides with the explicit AETHER_DEPLOY_TOKEN the
           # "Bump image tag" step uses to clone the separate Aether-Deploy
           # repo on the same git host.
           persist-credentials: false
@@ -67,7 +67,7 @@ jobs:
           # Auth credentials and fail with "Credentials are incorrect
           # or have expired" unless "user" happens to be the token's
           # actual owner account.
-          git clone "https://${{ secrets.FORGEJO_DEPLOY_TOKEN }}@$DEPLOY_REPO" /tmp/aether-deploy
+          git clone "https://${{ secrets.AETHER_DEPLOY_TOKEN }}@$DEPLOY_REPO" /tmp/aether-deploy
           cd /tmp/aether-deploy
           "$KUSTOMIZE" edit set image "$IMAGE=$IMAGE:$TAG"
 
