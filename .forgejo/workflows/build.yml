@@ -67,6 +67,10 @@ jobs:
           # Auth credentials and fail with "Credentials are incorrect
           # or have expired" unless "user" happens to be the token's
           # actual owner account.
+          # The runner executes host-mode (no fresh container per job), so
+          # a previous run's clone can still be sitting in /tmp - clear it
+          # before cloning fresh.
+          rm -rf /tmp/aether-deploy
           git clone "https://${{ secrets.AETHER_DEPLOY_TOKEN }}@$DEPLOY_REPO" /tmp/aether-deploy
           cd /tmp/aether-deploy
           "$KUSTOMIZE" edit set image "$IMAGE=$IMAGE:$TAG"
