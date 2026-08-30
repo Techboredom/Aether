@@ -1,10 +1,14 @@
+use std::net::SocketAddr;
+
 use argon2::password_hash::{phc::PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::Argon2;
-use axum::extract::{FromRequestParts, State};
+use axum::extract::{ConnectInfo, FromRequestParts, State};
+use axum::http::header::USER_AGENT;
 use axum::http::request::Parts;
+use axum::http::HeaderMap;
 use axum::Json;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
-use common::{ChangePasswordRequest, LoginRequest, Role, UserInfo};
+use common::{ChangePasswordRequest, LoginRequest, Role, SessionLogEntry, UserInfo};
 use rand::distr::Alphanumeric;
 use rand::RngExt;
 use sqlx::FromRow;
@@ -101,6 +105,8 @@ struct UserAuthRow {
 
 pub async fn login(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     jar: CookieJar,
     Json(req): Json<LoginRequest>,
 ) -> Result<(CookieJar, Json<UserInfo>), ApiError> {
@@ -119,6 +125,17 @@ pub async fn login(
         .bind(&token)
         .bind(row.id)
         .bind(SESSION_LIFETIME_DAYS as i32)
+        .execute(&state.pg)
+        .await?;
+
+    // Kept for support/metrics ("when did this user last log in, from
+    // where, with what browser") — separate from `sessions` above, which is
+    // deleted on logout/invalidation and only used for live auth checks.
+    let user_agent = headers.get(USER_AGENT).and_then(|v| v.to_str().ok());
+    sqlx::query("INSERT INTO session_log (user_id, ip_address, user_agent) VALUES ($1, $2, $3)")
+        .bind(row.id)
+        .bind(addr.ip().to_string())
+        .bind(user_agent)
         .execute(&state.pg)
         .await?;
 
@@ -173,4 +190,44 @@ pub async fn change_password(
             .await?;
     }
     Ok(())
+}
+
+#[derive(FromRow)]
+struct SessionLogRow {
+    username: String,
+    created_at: String,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+}
+
+impl From<SessionLogRow> for SessionLogEntry {
+    fn from(row: SessionLogRow) -> Self {
+        SessionLogEntry { username: row.username, created_at: row.created_at, ip_address: row.ip_address, user_agent: row.user_agent }
+    }
+}
+
+/// Login history: everyone's, for an admin; only your own, for a `user`
+/// account — same visibility split as the Pods tab. `username` is always
+/// included either way; the frontend just hides that column for non-admins,
+/// since a `user`-role response is already server-side filtered to just them.
+pub async fn list_sessions(user: CurrentUser, State(state): State<AppState>) -> Result<Json<Vec<SessionLogEntry>>, ApiError> {
+    let rows: Vec<SessionLogRow> = if user.role == Role::Admin {
+        sqlx::query_as(
+            "SELECT u.username, l.created_at::text, l.ip_address, l.user_agent \
+             FROM session_log l JOIN users u ON u.id = l.user_id \
+             ORDER BY l.created_at DESC LIMIT 200",
+        )
+        .fetch_all(&state.pg)
+        .await?
+    } else {
+        sqlx::query_as(
+            "SELECT u.username, l.created_at::text, l.ip_address, l.user_agent \
+             FROM session_log l JOIN users u ON u.id = l.user_id \
+             WHERE l.user_id = $1 ORDER BY l.created_at DESC LIMIT 200",
+        )
+        .bind(user.id)
+        .fetch_all(&state.pg)
+        .await?
+    };
+    Ok(Json(rows.into_iter().map(SessionLogEntry::from).collect()))
 }

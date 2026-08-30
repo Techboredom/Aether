@@ -85,6 +85,11 @@ pub struct ImageEntry {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CreateDeploymentRequest {
     pub name: String,
+    /// Name of the template this was launched from, if any (`None` for a
+    /// Custom launch) — purely descriptive, carried through to `launch_log`
+    /// for support/metrics; doesn't affect how the deployment is built.
+    #[serde(default)]
+    pub template_name: Option<String>,
     pub image: String,
     pub replicas: i32,
     pub cpu_request: Option<String>,
@@ -276,4 +281,42 @@ pub struct ResetPasswordRequest {
 pub struct ChangePasswordRequest {
     pub current_password: String,
     pub new_password: String,
+}
+
+/// One row of `GET /api/sessions` — a past login. `username` is always
+/// present; the frontend hides that column for non-admins the same way
+/// `PodInfo::owner` is hidden on the Pods tab, since a `user`-role account's
+/// query is already server-side filtered to just their own rows anyway.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SessionLogEntry {
+    pub username: String,
+    /// RFC3339-ish timestamp string (Postgres's default `timestamptz` text form).
+    pub created_at: String,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
+}
+
+/// One row of `GET /api/launches` — a past Launch-tab submission, kept for
+/// support/metrics ("who launched JupyterLab with what resources"). Same
+/// admin-vs-own visibility split as `SessionLogEntry`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LaunchLogEntry {
+    pub username: String,
+    pub created_at: String,
+    pub deployment_name: String,
+    pub template_name: Option<String>,
+    pub image: String,
+    pub replicas: i32,
+    pub cpu_request: Option<String>,
+    pub cpu_limit: Option<String>,
+    pub memory_request: Option<String>,
+    pub memory_limit: Option<String>,
+    pub accelerator_type: Option<String>,
+    pub accelerator_count: Option<i64>,
+    pub container_port: Option<i32>,
+    /// Same `(key, value)` shape as `TemplateEntry::env`. Any value matching
+    /// the launch's `generate_secret_for` key was redacted before this was
+    /// ever written to the database — see `deployments.rs`.
+    pub env: Vec<(String, String)>,
+    pub args: Vec<String>,
 }
