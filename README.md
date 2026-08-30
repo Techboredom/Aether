@@ -405,31 +405,29 @@ workflow) and have Docker available.
 Kubernetes manifests, the Argo CD `Application`, and full deploy
 instructions live in the separate
 [**Aether-Deploy**](https://git.example.com/Aether/Aether-Deploy)
-repo — not here (see "GitOps deploy" below for why). Two things still need
+repo — not here (see "GitOps deploy" below for why). One thing still needs
 creating by hand directly in the cluster's `aether` namespace regardless,
-since they're credentials rather than manifests and shouldn't live in
-either git repo:
+since it's a credential rather than a manifest and shouldn't live in either
+git repo:
 
-1. **Image pull secret** — the registry requires auth:
+- **Image pull secret** — the registry requires auth:
 
-   ```
-   kubectl create secret docker-registry regcred \
-     --docker-server=ctr.int.example.com:8443 \
-     --docker-username=<user> --docker-password=<password> \
-     -n aether
-   ```
+  ```
+  kubectl create secret docker-registry regcred \
+    --docker-server=ctr.int.example.com:8443 \
+    --docker-username=<user> --docker-password=<password> \
+    -n aether
+  ```
 
-2. **Database secret** — the app needs a Postgres connection string for the
-   image catalog:
-
-   ```
-   kubectl create secret generic aether-db -n aether \
-     --from-literal=DATABASE_URL='postgres://user:pass@host:5432/dbname'
-   ```
+Postgres doesn't need a manual secret — it runs in-cluster via
+CloudNativePG (`postgres-cluster.yaml` in Aether-Deploy), which
+auto-generates its own connection-string secret. See Aether-Deploy's
+README, "Postgres (CloudNativePG)", for the one-time operator/StorageClass
+bootstrap that needs.
 
 Everything else — the `ServiceAccount`/`Role`/`RoleBinding`, `Deployment`,
-`Service`, and how to point at a different namespace — is documented in
-Aether-Deploy's own README.
+`Service`, Postgres, and how to point at a different namespace — is
+documented in Aether-Deploy's own README.
 
 ## GitOps deploy (Argo CD)
 
@@ -665,16 +663,18 @@ gaps, in case they matter for what you do next:
   multi-GB vLLM/SGLang images, which would have been slow in this
   environment. Expect to iterate on their default resource sizing once you
   actually run one.
-- **Not yet deployed for real, as of this writing** — Argo CD and the
-  Aether-Deploy repo are wired up (see "GitOps deploy" above), but the
-  first real sync hasn't completed yet: it's waiting on a Deploy Key being
-  added to Aether-Deploy and a `FORGEJO_DEPLOY_TOKEN` CI secret. You still
-  need to create the `regcred` and `aether-db` secrets in-cluster too (see
-  "Deploying to Kubernetes" above) — Argo CD doesn't manage those, on
-  purpose.
-- **No in-cluster Postgres.** `DATABASE_URL` currently has to point at a
-  Postgres you already run somewhere; there's no manifest for one in
-  Aether-Deploy. Add one there if you want this to be fully self-contained.
+- **Not yet fully deployed for real, as of this writing** — Argo CD has
+  successfully synced Aether-Deploy (namespace, `Deployment`, `Service` with
+  a real external IP all exist), but the pod itself is stuck in
+  `ImagePullBackOff`: it needs the `regcred` secret created (see "Deploying
+  to Kubernetes" above) and a Postgres connection, neither of which exist
+  yet. CI hasn't produced a real image build yet either — the Forgejo
+  Actions runner isn't finished being set up.
+- **In-cluster Postgres (CloudNativePG) is wired up but not live yet** —
+  `postgres-cluster.yaml` in Aether-Deploy needs the CloudNativePG operator
+  installed and a real StorageClass named in its `storageClassName` field
+  (currently `REPLACE_ME`); both are in progress. See Aether-Deploy's
+  README, "Postgres (CloudNativePG)".
 - **No admin UI for the image catalog** (only for templates) — entries are
   added with raw SQL (see "Image and template catalogs" above). Fine for a
   handful of images, less so at scale.
