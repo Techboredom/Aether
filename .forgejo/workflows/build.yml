@@ -62,7 +62,12 @@ jobs:
           curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
           KUSTOMIZE="$PWD/kustomize"
 
-          git clone "https://aether-ci:${{ secrets.FORGEJO_DEPLOY_TOKEN }}@$DEPLOY_REPO" /tmp/aether-deploy
+          # Forgejo's PAT convention is token-only in the URL (no
+          # username) - "user:token@" pairs get checked as real Basic
+          # Auth credentials and fail with "Credentials are incorrect
+          # or have expired" unless "user" happens to be the token's
+          # actual owner account.
+          git clone "https://${{ secrets.FORGEJO_DEPLOY_TOKEN }}@$DEPLOY_REPO" /tmp/aether-deploy
           cd /tmp/aether-deploy
           "$KUSTOMIZE" edit set image "$IMAGE=$IMAGE:$TAG"
 
