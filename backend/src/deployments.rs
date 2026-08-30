@@ -51,8 +51,11 @@ pub async fn create_deployment(
     if let Some(key) = &req.generate_secret_for {
         validate::env_key(key)?;
     }
-    if req.enable_proxy && (req.generate_secret_for.is_none() || req.container_port.is_none()) {
-        return Err(ApiError::BadRequest("enable_proxy requires generate_secret_for and container_port".into()));
+    if req.enable_proxy && req.container_port.is_none() {
+        return Err(ApiError::BadRequest("enable_proxy requires container_port".into()));
+    }
+    if !req.public_service && !req.enable_proxy {
+        return Err(ApiError::BadRequest("public_service can only be false when enable_proxy is set — otherwise the app would be unreachable".into()));
     }
 
     let mut requests = BTreeMap::new();
@@ -157,12 +160,15 @@ pub async fn create_deployment(
     let name = created.metadata.name.unwrap_or(req.name);
 
     // No ingress controller in the cluster yet, so expose the app directly via
-    // its own LoadBalancer Service (MetalLB assigns it an external IP) —
-    // created regardless of `enable_proxy`, since Aether's own /proxy/ route
-    // (backend/src/proxy.rs) reaches proxy-enabled deployments through this
-    // same Service's in-cluster ClusterIP, not around it.
+    // its own Service — `LoadBalancer` (MetalLB assigns it an external IP) by
+    // default, or `ClusterIP`-only when `public_service` is false, which is
+    // required for apps with no auth of their own (Aether's own login is
+    // then the only gate). Created regardless of `enable_proxy`, since
+    // Aether's own /proxy/ route (backend/src/proxy.rs) reaches proxy-enabled
+    // deployments through this same Service's in-cluster ClusterIP either way.
     let mut service_name = None;
     if let Some(port) = req.container_port {
+        let service_type = if req.public_service { "LoadBalancer" } else { "ClusterIP" };
         let service = Service {
             metadata: ObjectMeta {
                 name: Some(name.clone()),
@@ -171,7 +177,7 @@ pub async fn create_deployment(
                 ..Default::default()
             },
             spec: Some(ServiceSpec {
-                type_: Some("LoadBalancer".to_string()),
+                type_: Some(service_type.to_string()),
                 selector: Some(selector_labels),
                 ports: Some(vec![ServicePort {
                     port,
@@ -187,23 +193,30 @@ pub async fn create_deployment(
         service_name = created_service.metadata.name;
     }
 
-    if let (Some(key), Some(value)) = (&req.generate_secret_for, &generated_secret) {
+    // Tracks proxy-routing metadata (not just credentials) for any
+    // proxy-enabled deployment, even ones with no generated secret at all
+    // (e.g. RStudio run with DISABLE_AUTH=true, relying solely on the
+    // ownership check below).
+    if req.generate_secret_for.is_some() || req.enable_proxy {
         sqlx::query(
             "INSERT INTO deployment_secrets \
-                (deployment_name, namespace, env_key, secret_value, owner_username, proxy_enabled, container_port) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7) \
+                (deployment_name, namespace, env_key, secret_value, owner_username, proxy_enabled, \
+                 container_port, strip_prefix) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
              ON CONFLICT (deployment_name) DO UPDATE SET \
                 namespace = EXCLUDED.namespace, env_key = EXCLUDED.env_key, \
                 secret_value = EXCLUDED.secret_value, owner_username = EXCLUDED.owner_username, \
-                proxy_enabled = EXCLUDED.proxy_enabled, container_port = EXCLUDED.container_port",
+                proxy_enabled = EXCLUDED.proxy_enabled, container_port = EXCLUDED.container_port, \
+                strip_prefix = EXCLUDED.strip_prefix",
         )
         .bind(&name)
         .bind(&state.namespace)
-        .bind(key)
-        .bind(value)
+        .bind(&req.generate_secret_for)
+        .bind(&generated_secret)
         .bind(&user.username)
         .bind(req.enable_proxy)
         .bind(req.container_port)
+        .bind(req.strip_prefix)
         .execute(&state.pg)
         .await?;
     }
@@ -217,5 +230,6 @@ pub async fn create_deployment(
         container_port: req.container_port,
         secret_value: generated_secret,
         proxy_path,
+        public_service: req.public_service,
     }))
 }

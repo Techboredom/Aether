@@ -153,32 +153,35 @@ fn PodRow(pod: PodInfo, selected_pod: RwSignal<Option<String>>, is_admin: bool) 
             <td>{format::bytes(pod.memory_limit_bytes)}</td>
             <td>{accelerators}</td>
             <td>
-                {match credential {
-                    Some(cred) => {
-                        view! {
-                            <div class="credential">
-                                {proxy_path.map(|path| {
-                                    view! {
-                                        <a
-                                            class="icon-button"
-                                            href=path
-                                            target="_blank"
-                                            title="Open — already logged in, no token needed"
-                                            on:click=|ev: leptos::ev::MouseEvent| ev.stop_propagation()
-                                        >
-                                            "Open"
-                                        </a>
-                                    }
-                                })}
-                                <span class="credential-key">{cred.env_key}</span>
-                                <code class="credential-value" title="Click to select, then copy">
-                                    {cred.value}
-                                </code>
-                            </div>
-                        }
-                            .into_any()
+                {if credential.is_none() && proxy_path.is_none() {
+                    view! { "—" }.into_any()
+                } else {
+                    view! {
+                        <div class="credential">
+                            {proxy_path.map(|path| {
+                                view! {
+                                    <a
+                                        class="icon-button"
+                                        href=path
+                                        target="_blank"
+                                        title="Open — already logged in, no token needed"
+                                        on:click=|ev: leptos::ev::MouseEvent| ev.stop_propagation()
+                                    >
+                                        "Open"
+                                    </a>
+                                }
+                            })}
+                            {credential.map(|cred| {
+                                view! {
+                                    <span class="credential-key">{cred.env_key}</span>
+                                    <code class="credential-value" title="Click to select, then copy">
+                                        {cred.value}
+                                    </code>
+                                }
+                            })}
+                        </div>
                     }
-                    None => view! { "—" }.into_any(),
+                        .into_any()
                 }}
             </td>
         </tr>

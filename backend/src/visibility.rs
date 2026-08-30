@@ -30,7 +30,7 @@ pub async fn visible_to(pods: Vec<PodInfo>, user: &CurrentUser, pg: &PgPool) -> 
     for pod in &mut visible {
         if let Some(name) = &pod.deployment_name
             && let Some(stored) = secrets.get(name) {
-                pod.credential = Some(stored.credential.clone());
+                pod.credential = stored.credential.clone();
                 pod.proxy_path = stored.proxy_enabled.then(|| format!("/proxy/{name}/"));
             }
     }
@@ -48,25 +48,32 @@ pub fn can_see(pod: &PodInfo, user: &CurrentUser) -> bool {
 /// would be overkill.
 pub async fn attach_credential(pod: &mut PodInfo, pg: &PgPool) {
     let Some(name) = &pod.deployment_name else { return };
-    if let Ok(Some((env_key, value, proxy_enabled))) = sqlx::query_as::<_, (String, String, bool)>(
+    if let Ok(Some((env_key, value, proxy_enabled))) = sqlx::query_as::<_, (Option<String>, Option<String>, bool)>(
         "SELECT env_key, secret_value, proxy_enabled FROM deployment_secrets WHERE deployment_name = $1",
     )
     .bind(name)
     .fetch_optional(pg)
     .await
     {
-        pod.credential = Some(PodCredential { env_key, value });
+        pod.credential = credential_from(env_key, value);
         pod.proxy_path = proxy_enabled.then(|| format!("/proxy/{name}/"));
     }
 }
 
 struct StoredSecret {
-    credential: PodCredential,
+    credential: Option<PodCredential>,
     proxy_enabled: bool,
 }
 
+fn credential_from(env_key: Option<String>, value: Option<String>) -> Option<PodCredential> {
+    match (env_key, value) {
+        (Some(env_key), Some(value)) => Some(PodCredential { env_key, value }),
+        _ => None,
+    }
+}
+
 async fn load_secrets(pg: &PgPool, deployment_names: &[String]) -> Result<HashMap<String, StoredSecret>, sqlx::Error> {
-    let rows: Vec<(String, String, String, bool)> = sqlx::query_as(
+    let rows: Vec<(String, Option<String>, Option<String>, bool)> = sqlx::query_as(
         "SELECT deployment_name, env_key, secret_value, proxy_enabled FROM deployment_secrets WHERE deployment_name = ANY($1)",
     )
     .bind(deployment_names)
@@ -74,6 +81,8 @@ async fn load_secrets(pg: &PgPool, deployment_names: &[String]) -> Result<HashMa
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(name, env_key, value, proxy_enabled)| (name, StoredSecret { credential: PodCredential { env_key, value }, proxy_enabled }))
+        .map(|(name, env_key, value, proxy_enabled)| {
+            (name, StoredSecret { credential: credential_from(env_key, value), proxy_enabled })
+        })
         .collect())
 }
