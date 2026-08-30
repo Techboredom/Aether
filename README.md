@@ -1,12 +1,13 @@
 # Aether
 
-A dashboard for a Kubernetes namespace, behind a login, with up to four tabs
+A dashboard for a Kubernetes namespace, behind a login, with up to five tabs
 depending on your role. It's the web-interface slice of the broader platform
 described in `SPEC.md` — the Intelligence Layer (LLM engines) and Interface
 Layer (IDEs) as launchable workloads — scoped down to what's actually
-buildable today: this cluster has no ingress controller or StorageClass yet,
-so there's no Gateway layer or persistent storage (see "Status & known
-limitations" below).
+buildable today: this cluster has no ingress controller, so there's no
+Gateway layer, and a StorageClass is only just being added (see "Status &
+known limitations" below) — Aether's own Postgres is wired up to use it
+(CloudNativePG, see "Deploying to Kubernetes" below) but isn't live yet.
 
 There are two account roles: **admin** and **user**. Both can use Pods and
 Launch; only admins see Templates and Users.
@@ -67,6 +68,10 @@ Any logged-in user (either role) can change their own password via
   WASM with [Trunk](https://trunkrs.dev)). Loads the initial pod snapshot over
   REST, then stays in sync over the WebSocket.
 - **Repo**: `ssh://git@git.example.com:2022/Aether/Aether-Web.git`
+  (app code — this repo). Kubernetes manifests and the Argo CD `Application`
+  live in a separate
+  [**Aether-Deploy**](https://git.example.com/Aether/Aether-Deploy)
+  repo — see "GitOps deploy (Argo CD)" below for why.
 
 ## Layout
 
@@ -453,8 +458,31 @@ Requires three repository secrets in Forgejo (Settings → Actions → Secrets):
   **Aether-Deploy's** contents (not this repo), used only to push the
   image-tag-bump commit above.
 
-The runner must be labeled `docker` (matching `runs-on: docker` in the
-workflow) and have Docker available.
+The runner must be registered with a `docker` label (matching `runs-on:
+docker` in the workflow) — registered from the *repo's* (or org's) Actions →
+Runners settings page specifically, not some other scope, or it won't be
+visible to this workflow at all despite showing "Idle" in its own runner
+list (Forgejo scopes runners by wherever their registration token came
+from: instance-wide, org, user, or single-repo).
+
+This workflow's `docker` label runs in **host mode**
+(`runner.labels: ["docker:host"]` in the runner's own `config.yaml` — no
+per-job container at all), a deliberate choice since this workflow only
+ever builds/pushes Docker images and doesn't need per-job isolation; it
+also sidesteps the classic Alpine-job-image problem (Forgejo's runner
+injects a glibc-linked Node build to execute JS-based actions like
+`actions/checkout@v4`, which won't run on musl-based Alpine). In host mode,
+the runner machine itself needs, directly on its `PATH`:
+
+- **Docker**, obviously, plus TLS trust for the Harbor registry — Docker's
+  daemon has its own registry-TLS trust store, completely separate from the
+  system CA bundle, so a cert trusted system-wide (`update-ca-trust`/`trust
+  anchor`) still won't let `docker login`/`push` succeed. Drop the CA cert
+  at `/etc/docker/certs.d/ctr.int.example.com:8443/ca.crt` (directory
+  name must exactly match the registry host:port) and restart the Docker
+  daemon specifically — not just the runner.
+- **git** (for `actions/checkout`) and **Node.js 20+** (`actions/checkout@v4`
+  is itself a Node.js action, regardless of host vs. container execution).
 
 ## Deploying to Kubernetes
 
@@ -699,8 +727,12 @@ through to the frontend's own SPA fallback; fixed by adding two explicit
 routes for it, see `backend/src/proxy.rs::handler_root`.) A parallel
 `rocker/rstudio` pod, launched with `DISABLE_AUTH=true` and `public_service:
 false`, was confirmed to get a `ClusterIP`-only Service (no external IP at
-all) and to correctly reject a non-owner on that same bare path. Known
-gaps, in case they matter for what you do next:
+all) and to correctly reject a non-owner on that same bare path. The
+Activity tab's login/launch history was verified the same way: two real
+accounts confirmed each only sees their own rows while an admin sees both,
+and a launched deployment's `generate_secret_for` value confirmed redacted
+to `"<generated>"` in `launch_log` rather than storing the real credential.
+Known gaps, in case they matter for what you do next:
 
 - **Still no "forgot password" self-service flow** — that requires emailing
   a reset link, which this app has no mechanism for (no SMTP config, no
@@ -728,8 +760,10 @@ gaps, in case they matter for what you do next:
   a real external IP all exist), but the pod itself is stuck in
   `ImagePullBackOff`: it needs the `regcred` secret created (see "Deploying
   to Kubernetes" above) and a Postgres connection, neither of which exist
-  yet. CI hasn't produced a real image build yet either — the Forgejo
-  Actions runner isn't finished being set up.
+  yet. The Forgejo Actions runner setup (see "CI" above) is now believed
+  complete — scope, job-container/host-mode, Node, and registry-TLS issues
+  all resolved — but a full green build → tag-bump → Argo CD sync run
+  hasn't actually been observed end-to-end yet.
 - **In-cluster Postgres (CloudNativePG) is wired up but not live yet** —
   `postgres-cluster.yaml` in Aether-Deploy needs the CloudNativePG operator
   installed and a real StorageClass named in its `storageClassName` field
