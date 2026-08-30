@@ -3,10 +3,12 @@ mod activity_tab;
 mod create_deployment_tab;
 mod env_editor;
 mod format;
+mod images_tab;
 mod login;
 mod pod_detail;
 mod pods_tab;
 mod templates_tab;
+mod theme;
 mod users_tab;
 mod ws;
 
@@ -15,6 +17,7 @@ use activity_tab::ActivityTab;
 use common::{Role, UserInfo};
 use create_deployment_tab::CreateDeploymentTab;
 use gloo_net::http::Request;
+use images_tab::ImagesTab;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use login::LoginPage;
@@ -33,11 +36,13 @@ enum Tab {
     Launch,
     Activity,
     Templates,
+    Images,
     Users,
 }
 
 #[component]
 fn App() -> impl IntoView {
+    let theme = theme::init_theme();
     let current_user: RwSignal<Option<UserInfo>> = RwSignal::new(None);
     let checking = RwSignal::new(true);
 
@@ -57,7 +62,7 @@ fn App() -> impl IntoView {
             } else {
                 match current_user.get() {
                     None => view! { <LoginPage current_user=current_user /> }.into_any(),
-                    Some(user) => view! { <AppShell user=user current_user=current_user /> }.into_any(),
+                    Some(user) => view! { <AppShell user=user current_user=current_user theme=theme /> }.into_any(),
                 }
             }
         }}
@@ -65,7 +70,7 @@ fn App() -> impl IntoView {
 }
 
 #[component]
-fn AppShell(user: UserInfo, current_user: RwSignal<Option<UserInfo>>) -> impl IntoView {
+fn AppShell(user: UserInfo, current_user: RwSignal<Option<UserInfo>>, theme: RwSignal<String>) -> impl IntoView {
     let tab = RwSignal::new(Tab::Pods);
     let is_admin = user.role == Role::Admin;
     let username = user.username.clone();
@@ -114,6 +119,13 @@ fn AppShell(user: UserInfo, current_user: RwSignal<Option<UserInfo>>) -> impl In
                         </button>
                         <button
                             class="tab-button"
+                            class:active=move || tab.get() == Tab::Images
+                            on:click=move |_| tab.set(Tab::Images)
+                        >
+                            "Images"
+                        </button>
+                        <button
+                            class="tab-button"
                             class:active=move || tab.get() == Tab::Users
                             on:click=move |_| tab.set(Tab::Users)
                         >
@@ -123,6 +135,12 @@ fn AppShell(user: UserInfo, current_user: RwSignal<Option<UserInfo>>) -> impl In
                 </nav>
                 <div class="user-info">
                     <span class="username">{username}</span>
+                    <button
+                        class="icon-button"
+                        on:click=move |_| theme::toggle(theme)
+                    >
+                        {move || if theme.get() == "light" { "Dark theme" } else { "Light theme" }}
+                    </button>
                     <button class="icon-button" on:click=move |_| show_change_password.set(true)>
                         "Change password"
                     </button>
@@ -148,6 +166,9 @@ fn AppShell(user: UserInfo, current_user: RwSignal<Option<UserInfo>>) -> impl In
             <Show when=move || is_admin>
                 <div class:hidden=move || tab.get() != Tab::Templates>
                     <TemplatesTab />
+                </div>
+                <div class:hidden=move || tab.get() != Tab::Images>
+                    <ImagesTab />
                 </div>
                 <div class:hidden=move || tab.get() != Tab::Users>
                     <UsersTab />

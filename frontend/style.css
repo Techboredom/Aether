@@ -29,6 +29,23 @@
   --space-5: 24px;
 }
 
+/* Validated light-mode steps from the design system's chart-chrome/ink
+   tokens (dataviz skill references/palette.md) — text-muted, accent-ink,
+   and the status palette are the same in both modes, so they're left
+   inherited from :root rather than repeated here. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --surface-raised: #ffffff;
+  --border: rgba(11, 11, 11, 0.1);
+  --border-strong: #e1e0d9;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+
+  --accent: #2a78d6;
+}
+
 * {
   box-sizing: border-box;
 }
