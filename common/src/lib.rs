@@ -384,8 +384,17 @@ pub struct QuotaSettings {
     /// Whether the Launch tab and the Pods tab's manage panel show
     /// separate CPU/memory *request* fields at all, independent of the
     /// quota limits themselves. When `false`, only limits are shown/sent,
-    /// and Kubernetes defaults a container's request to match its limit.
+    /// and a fixed request is substituted server-side (see below) instead
+    /// of leaving it for Kubernetes to default to match the limit.
     pub expose_resource_requests: bool,
+    /// Applied to every launch/edit's CPU/memory request in place of
+    /// whatever the user would have set, but only while
+    /// `expose_resource_requests` is `false` — irrelevant otherwise, since
+    /// the user sets their own request directly in that mode. `None`
+    /// means "leave the request unset", letting Kubernetes default it to
+    /// match the limit.
+    pub fixed_cpu_request: Option<String>,
+    pub fixed_memory_request: Option<String>,
 }
 
 /// Returned by `GET /api/quota/me` — the caller's own effective quota,
@@ -399,6 +408,10 @@ pub struct MyQuota {
     pub limits: QuotaLimits,
     pub is_override: bool,
     pub expose_resource_requests: bool,
+    /// Purely informational — the frontend never sends these back, the
+    /// backend applies them server-side. See `QuotaSettings::fixed_cpu_request`.
+    pub fixed_cpu_request: Option<String>,
+    pub fixed_memory_request: Option<String>,
     pub used_cpu_millicores: i64,
     pub used_memory_bytes: i64,
     pub used_gpu_count: i64,

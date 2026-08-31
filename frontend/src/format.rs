@@ -87,6 +87,20 @@ pub fn quota_summary(quota: &MyQuota) -> String {
     format!("CPU limit: {cpu} · Memory limit: {mem} · GPUs: {gpu}")
 }
 
+/// Note shown in place of the (hidden) request fields when
+/// `expose_resource_requests` is off, naming whatever fixed values an
+/// admin configured — `None` if neither is set (falls back silently to
+/// Kubernetes defaulting the request to the limit, same as before fixed
+/// requests existed).
+pub fn fixed_request_note(quota: &MyQuota) -> Option<String> {
+    if quota.fixed_cpu_request.is_none() && quota.fixed_memory_request.is_none() {
+        return None;
+    }
+    let cpu = quota.fixed_cpu_request.as_deref().unwrap_or("unset");
+    let mem = quota.fixed_memory_request.as_deref().unwrap_or("unset");
+    Some(format!("Resource requests are fixed by your admin — CPU: {cpu}, Memory: {mem}."))
+}
+
 /// Renders a kubectl-style compact age string (e.g. "3d", "5h12m", "45s") from an
 /// RFC 3339 timestamp, relative to the current time in the browser.
 pub fn age(start_time: Option<&str>) -> String {

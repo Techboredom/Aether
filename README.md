@@ -185,7 +185,7 @@ additionally require the `admin` role (403 otherwise).
 - `GET /api/pods/{name}/logs?container=&tail_lines=&previous=` — plain-text container logs (`container` defaults to the pod's only container if it has one; `tail_lines` defaults to 500; `previous=true` gets the last terminated instance's logs, for a crashed container)
 - `GET /api/pods/{name}/events` — JSON list of Kubernetes Events involving that pod (`type_`, `reason`, `message`, `count`, `last_seen`), most recent first — note the apiserver's default Event TTL is short (commonly ~1h), so older pods often have none left
 - `GET /api/quota/me` — the caller's own effective quota (their `user_quotas` override if they have one, else the global default), current usage, and `expose_resource_requests`. Always unlimited limits for an admin (exempt from enforcement), though `expose_resource_requests` still applies to everyone. Backs the Launch tab and the Pods tab's manage panel.
-- `GET /api/quota/settings` / `PUT /api/quota/settings` *(admin for PUT; GET requires only login)* — the global default quota: `{cpu_limit, memory_limit, gpu_limit, expose_resource_requests}`. The three limit fields are quantity strings (`cpu_limit`/`memory_limit`, e.g. `"4"`/`"16Gi"`) or a plain integer (`gpu_limit`) — `null`/omitted means unlimited for that dimension.
+- `GET /api/quota/settings` / `PUT /api/quota/settings` *(admin for PUT; GET requires only login)* — the global default quota: `{cpu_limit, memory_limit, gpu_limit, expose_resource_requests, fixed_cpu_request, fixed_memory_request}`. The limit/request fields are quantity strings (e.g. `"4"`/`"16Gi"`) or a plain integer (`gpu_limit`) — `null`/omitted means unlimited for a limit, or "leave unset" for a fixed request. `fixed_cpu_request`/`fixed_memory_request` only take effect while `expose_resource_requests` is `false` (see "User quotas" below).
 - `GET /api/quota/users` *(admin)* — every account's `{user_id, username, quota_override, used_cpu_millicores, used_memory_bytes, used_gpu_count}` — `quota_override` is `null` if that user has no override and is bound by the global default. Backs the Quotas admin tab's table.
 - `PUT /api/quota/users/{id}` *(admin)* — sets (or replaces) a user's quota override, same `{cpu_limit, memory_limit, gpu_limit}` shape as the global settings' limits. `DELETE /api/quota/users/{id}` *(admin)* clears it, reverting that user to the global default.
 - `GET /*` — serves the built frontend (`index.html`, JS, WASM, CSS)
@@ -443,12 +443,21 @@ AMD GPUs anyway.
 
 A separate global toggle, **`expose_resource_requests`**, controls whether
 the Launch tab and the Pods tab's manage panel show CPU/memory *request*
-fields at all, independent of the quota limits themselves. With it off,
-only limits are shown or ever sent to the backend — Kubernetes itself then
-defaults a container's request to match its limit when a limit is given
-with no request, so nothing needs to be filled in on the server side to
-compensate. This is deliberately just a display/input setting, not a
-quota dimension of its own.
+fields at all, independent of the quota limits themselves. This is
+deliberately just a display/input setting, not a quota dimension of its
+own. With it off, those fields disappear and the backend substitutes an
+admin-configured **fixed request** (`fixed_cpu_request`/
+`fixed_memory_request`, also set from the Quotas tab, shown only while
+`expose_resource_requests` is off) for every launch and edit instead —
+regardless of what limit is set. Left blank, a dimension's request is
+simply never set at all, and Kubernetes' own default behavior takes over
+(matching a container's request to its limit when a limit is given with
+no request — Guaranteed QoS, reserving the full limit). A configured fixed
+value avoids that default, letting requests stay low and predictable
+(Burstable QoS) even when limits are generous. The Launch tab and manage
+panel both show a note naming whatever fixed values are configured, so
+users aren't left guessing why the request fields disappeared or what
+they're actually getting.
 
 Scaling or editing an existing deployment excludes *that deployment's own*
 current usage from the baseline before adding its proposed new footprint,
@@ -850,7 +859,14 @@ scale/edit path's exclude-self accounting confirmed correct via exact
 arithmetic on a real scale-up attempt, and a full Puppeteer pass covering
 the Launch tab's quota summary display, the request-fields toggle actually
 hiding/showing the right inputs after being flipped from the Quotas admin
-tab, and the per-user usage table rendering real numbers. Known gaps, in
+tab, and the per-user usage table rendering real numbers. Fixed requests
+were verified via `kubectl`: a deployment launched with a 1-core limit and
+no request fields sent came back with its actual request pinned to the
+configured fixed value (not defaulted up to match the limit), an edit
+raising that same deployment's limit left its request untouched at the
+fixed value, and re-enabling `expose_resource_requests` and launching with
+an explicit request confirmed that value was honored normally again (no
+fixed-request interference once the toggle is back on). Known gaps, in
 case they matter for what you do next:
 
 - **Still no "forgot password" self-service flow** — that requires emailing

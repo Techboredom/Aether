@@ -83,15 +83,26 @@ pub async fn create_deployment(
     };
     quota::check_quota(&state, &user, None, additional_cpu, additional_memory, additional_gpu).await?;
 
+    // When requests aren't exposed to the user, an admin-configured fixed
+    // value stands in for whatever they would have set (which is nothing,
+    // since the frontend doesn't even show the field in that mode) rather
+    // than leaving it for Kubernetes to default the request to the limit.
+    let global_settings = quota::load_global_settings(&state.pg).await?;
+    let (cpu_request, memory_request) = if global_settings.expose_resource_requests {
+        (req.cpu_request.clone(), req.memory_request.clone())
+    } else {
+        (global_settings.fixed_cpu_request.clone(), global_settings.fixed_memory_request.clone())
+    };
+
     let mut requests = BTreeMap::new();
     let mut limits = BTreeMap::new();
-    if let Some(v) = &req.cpu_request {
+    if let Some(v) = &cpu_request {
         requests.insert("cpu".to_string(), Quantity(v.clone()));
     }
     if let Some(v) = &req.cpu_limit {
         limits.insert("cpu".to_string(), Quantity(v.clone()));
     }
-    if let Some(v) = &req.memory_request {
+    if let Some(v) = &memory_request {
         requests.insert("memory".to_string(), Quantity(v.clone()));
     }
     if let Some(v) = &req.memory_limit {
@@ -489,15 +500,23 @@ pub async fn update_deployment(
     // current one through untouched.
     let secret = generated_secret(&state.pg, &name).await?;
 
+    // Same fixed-request substitution as create_deployment - see there.
+    let global_settings = quota::load_global_settings(&state.pg).await?;
+    let (cpu_request, memory_request) = if global_settings.expose_resource_requests {
+        (req.cpu_request.clone(), req.memory_request.clone())
+    } else {
+        (global_settings.fixed_cpu_request.clone(), global_settings.fixed_memory_request.clone())
+    };
+
     let mut requests = BTreeMap::new();
     let mut limits = BTreeMap::new();
-    if let Some(v) = &req.cpu_request {
+    if let Some(v) = &cpu_request {
         requests.insert("cpu".to_string(), Quantity(v.clone()));
     }
     if let Some(v) = &req.cpu_limit {
         limits.insert("cpu".to_string(), Quantity(v.clone()));
     }
-    if let Some(v) = &req.memory_request {
+    if let Some(v) = &memory_request {
         requests.insert("memory".to_string(), Quantity(v.clone()));
     }
     if let Some(v) = &req.memory_limit {

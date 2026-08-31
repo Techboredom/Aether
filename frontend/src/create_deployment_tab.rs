@@ -5,7 +5,7 @@ use leptos::tachys::dom::event_target_value;
 use leptos::task::spawn_local;
 
 use crate::env_editor::{EnvVars, EnvVarsEditor};
-use crate::format::quota_summary;
+use crate::format::{fixed_request_note, quota_summary};
 
 /// A successful launch's (message, proxy_path) pair.
 type LaunchResult = Result<(String, Option<String>), String>;
@@ -283,6 +283,11 @@ pub fn CreateDeploymentTab() -> impl IntoView {
 
                 {move || {
                     my_quota.get().map(|q| view! { <div class="template-notes">{quota_summary(&q)}</div> })
+                }}
+                {move || {
+                    my_quota.get().and_then(|q| fixed_request_note(&q)).map(|note| {
+                        view! { <div class="template-notes">{note}</div> }
+                    })
                 }}
 
                 <fieldset>
