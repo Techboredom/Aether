@@ -1,4 +1,4 @@
-use common::{CreateUserRequest, ResetPasswordRequest, Role, UserInfo};
+use common::{CreateUserRequest, ResetPasswordRequest, Role, SetNodeLabelRequest, UserInfo};
 use gloo_net::http::Request;
 use leptos::prelude::*;
 use leptos::tachys::dom::event_target_value;
@@ -20,6 +20,11 @@ pub fn UsersTab() -> impl IntoView {
     let reset_password_value = RwSignal::new(String::new());
     let reset_saving = RwSignal::new(false);
     let reset_result: RwSignal<Option<Result<String, String>>> = RwSignal::new(None);
+
+    let label_target: RwSignal<Option<(i32, String)>> = RwSignal::new(None);
+    let label_value = RwSignal::new(String::new());
+    let label_saving = RwSignal::new(false);
+    let label_result: RwSignal<Option<Result<String, String>>> = RwSignal::new(None);
 
     let refresh = move || {
         spawn_local(async move {
@@ -96,6 +101,7 @@ pub fn UsersTab() -> impl IntoView {
                         <tr>
                             <th>"Username"</th>
                             <th>"Role"</th>
+                            <th>"Node label"</th>
                             <th></th>
                         </tr>
                     </thead>
@@ -104,21 +110,37 @@ pub fn UsersTab() -> impl IntoView {
                             {
                                 let id = u.id;
                                 let role_label = if u.role == Role::Admin { "admin" } else { "user" };
+                                let node_label_display = u.node_label.clone().unwrap_or_else(|| "—".to_string());
+                                let reset_username = u.username.clone();
+                                let label_username = u.username.clone();
+                                let current_node_label = u.node_label.clone().unwrap_or_default();
                                 view! {
                                     <tr>
                                         <td>{u.username.clone()}</td>
                                         <td>{role_label}</td>
+                                        <td>{node_label_display}</td>
                                         <td class="table-actions">
                                             <button
                                                 type="button"
                                                 class="icon-button"
                                                 on:click=move |_| {
-                                                    reset_target.set(Some((id, u.username.clone())));
+                                                    reset_target.set(Some((id, reset_username.clone())));
                                                     reset_password_value.set(String::new());
                                                     reset_result.set(None);
                                                 }
                                             >
                                                 "Reset password"
+                                            </button>
+                                            <button
+                                                type="button"
+                                                class="icon-button"
+                                                on:click=move |_| {
+                                                    label_target.set(Some((id, label_username.clone())));
+                                                    label_value.set(current_node_label.clone());
+                                                    label_result.set(None);
+                                                }
+                                            >
+                                                "Node label"
                                             </button>
                                             <button type="button" class="icon-button" on:click=move |_| delete_user(id)>
                                                 "Delete"
@@ -191,6 +213,65 @@ pub fn UsersTab() -> impl IntoView {
                 })
             }}
 
+            {move || {
+                label_target
+                    .get()
+                    .map(|(id, target_username)| {
+                        let on_label_submit = move |ev: web_sys::SubmitEvent| {
+                            ev.prevent_default();
+                            if label_saving.get() {
+                                return;
+                            }
+                            let value = label_value.get();
+                            label_saving.set(true);
+                            label_result.set(None);
+                            spawn_local(async move {
+                                let outcome = set_node_label(id, value).await;
+                                label_saving.set(false);
+                                match outcome {
+                                    Ok(msg) => {
+                                        label_result.set(Some(Ok(msg)));
+                                        label_target.set(None);
+                                        refresh();
+                                    }
+                                    Err(err) => label_result.set(Some(Err(err))),
+                                }
+                            });
+                        };
+                        view! {
+                            <h3 class="section-heading">{format!("Node label for \"{target_username}\"")}</h3>
+                            <form class="deploy-form" on:submit=on_label_submit>
+                                <label>
+                                    "Label (\"key=value\", e.g. \"node-type=cpu\")"
+                                    <input
+                                        type="text"
+                                        placeholder="leave empty for unrestricted placement"
+                                        prop:value=move || label_value.get()
+                                        on:input=move |ev| label_value.set(event_target_value(&ev))
+                                    />
+                                </label>
+                                <p class="hint">
+                                    "Every future launch from this account is scheduled only onto nodes carrying this label. Existing deployments aren't affected."
+                                </p>
+                                <div class="form-actions">
+                                    <button type="submit" disabled=move || label_saving.get()>
+                                        {move || if label_saving.get() { "Saving…" } else { "Save" }}
+                                    </button>
+                                    <button type="button" class="secondary-button" on:click=move |_| label_target.set(None)>
+                                        "Cancel"
+                                    </button>
+                                </div>
+                            </form>
+                        }
+                    })
+            }}
+            {move || {
+                label_result.get().map(|res| match res {
+                    Ok(msg) => view! { <div class="success">{msg}</div> }.into_any(),
+                    Err(msg) => view! { <div class="error">{msg}</div> }.into_any(),
+                })
+            }}
+
             <h3 class="section-heading">"New user"</h3>
             <form class="deploy-form" on:submit=on_submit>
                 <label>
@@ -233,6 +314,26 @@ pub fn UsersTab() -> impl IntoView {
                 })
             }}
         </div>
+    }
+}
+
+async fn set_node_label(id: i32, value: String) -> Result<String, String> {
+    let trimmed = value.trim();
+    let node_label = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+    let cleared = node_label.is_none();
+    let resp = Request::put(&format!("/api/users/{id}/node-label"))
+        .json(&SetNodeLabelRequest { node_label })
+        .map_err(|err| format!("failed to encode request: {err}"))?
+        .send()
+        .await
+        .map_err(|err| format!("request failed: {err}"))?;
+
+    if resp.ok() {
+        Ok(if cleared { "Node label cleared.".to_string() } else { "Node label saved.".to_string() })
+    } else {
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        let message = body.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");
+        Err(format!("Failed to save node label: {message}"))
     }
 }
 

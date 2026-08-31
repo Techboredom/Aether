@@ -47,6 +47,8 @@ pub struct CurrentUser {
     pub id: i32,
     pub username: String,
     pub role: Role,
+    /// Admin-set "key=value" node label, if any — see `common::UserInfo::node_label`.
+    pub node_label: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -54,6 +56,7 @@ struct SessionUserRow {
     id: i32,
     username: String,
     role: String,
+    node_label: Option<String>,
 }
 
 impl FromRequestParts<AppState> for CurrentUser {
@@ -64,7 +67,7 @@ impl FromRequestParts<AppState> for CurrentUser {
         let token = jar.get(SESSION_COOKIE).map(|c| c.value().to_string()).ok_or(ApiError::Unauthorized)?;
 
         let row: Option<SessionUserRow> = sqlx::query_as(
-            "SELECT u.id, u.username, u.role FROM sessions s \
+            "SELECT u.id, u.username, u.role, u.node_label FROM sessions s \
              JOIN users u ON u.id = s.user_id \
              WHERE s.token = $1 AND s.expires_at > now()",
         )
@@ -75,7 +78,7 @@ impl FromRequestParts<AppState> for CurrentUser {
 
         let row = row.ok_or(ApiError::Unauthorized)?;
         let role = if row.role == "admin" { Role::Admin } else { Role::User };
-        Ok(CurrentUser { id: row.id, username: row.username, role })
+        Ok(CurrentUser { id: row.id, username: row.username, role, node_label: row.node_label })
     }
 }
 
@@ -101,6 +104,7 @@ struct UserAuthRow {
     username: String,
     password_hash: String,
     role: String,
+    node_label: Option<String>,
 }
 
 pub async fn login(
@@ -110,7 +114,7 @@ pub async fn login(
     jar: CookieJar,
     Json(req): Json<LoginRequest>,
 ) -> Result<(CookieJar, Json<UserInfo>), ApiError> {
-    let row: Option<UserAuthRow> = sqlx::query_as("SELECT id, username, password_hash, role FROM users WHERE username = $1")
+    let row: Option<UserAuthRow> = sqlx::query_as("SELECT id, username, password_hash, role, node_label FROM users WHERE username = $1")
         .bind(&req.username)
         .fetch_optional(&state.pg)
         .await?;
@@ -147,7 +151,7 @@ pub async fn login(
         .build();
 
     let role = if row.role == "admin" { Role::Admin } else { Role::User };
-    Ok((jar.add(cookie), Json(UserInfo { id: row.id, username: row.username, role })))
+    Ok((jar.add(cookie), Json(UserInfo { id: row.id, username: row.username, role, node_label: row.node_label })))
 }
 
 pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> Result<CookieJar, ApiError> {
@@ -160,7 +164,7 @@ pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> Result<Coo
 }
 
 pub async fn me(user: CurrentUser) -> Json<UserInfo> {
-    Json(UserInfo { id: user.id, username: user.username, role: user.role })
+    Json(UserInfo { id: user.id, username: user.username, role: user.role, node_label: user.node_label })
 }
 
 /// Lets a logged-in user change their own password, proving they know the

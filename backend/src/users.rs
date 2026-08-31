@@ -1,6 +1,6 @@
 use axum::extract::{Path, State};
 use axum::Json;
-use common::{CreateUserRequest, ResetPasswordRequest, Role, UserInfo};
+use common::{CreateUserRequest, ResetPasswordRequest, Role, SetNodeLabelRequest, UserInfo};
 use sqlx::FromRow;
 
 use crate::auth::{hash_password, AdminUser};
@@ -13,16 +13,23 @@ struct UserRow {
     id: i32,
     username: String,
     role: String,
+    node_label: Option<String>,
 }
 
 impl From<UserRow> for UserInfo {
     fn from(row: UserRow) -> Self {
-        UserInfo { id: row.id, username: row.username, role: if row.role == "admin" { Role::Admin } else { Role::User } }
+        UserInfo {
+            id: row.id,
+            username: row.username,
+            role: if row.role == "admin" { Role::Admin } else { Role::User },
+            node_label: row.node_label,
+        }
     }
 }
 
 pub async fn list_users(_admin: AdminUser, State(state): State<AppState>) -> Result<Json<Vec<UserInfo>>, ApiError> {
-    let rows: Vec<UserRow> = sqlx::query_as("SELECT id, username, role FROM users ORDER BY username").fetch_all(&state.pg).await?;
+    let rows: Vec<UserRow> =
+        sqlx::query_as("SELECT id, username, role, node_label FROM users ORDER BY username").fetch_all(&state.pg).await?;
     Ok(Json(rows.into_iter().map(UserInfo::from).collect()))
 }
 
@@ -37,7 +44,9 @@ pub async fn create_user(
     let password_hash = hash_password(&req.password)?;
     let role_str = if req.role == Role::Admin { "admin" } else { "user" };
 
-    let row: UserRow = sqlx::query_as("INSERT INTO users (username, password_hash, role) VALUES ($1, $2, $3) RETURNING id, username, role")
+    let row: UserRow = sqlx::query_as(
+        "INSERT INTO users (username, password_hash, role) VALUES ($1, $2, $3) RETURNING id, username, role, node_label",
+    )
         .bind(&req.username)
         .bind(&password_hash)
         .bind(role_str)
@@ -82,4 +91,29 @@ pub async fn reset_password(
     }
     sqlx::query("DELETE FROM sessions WHERE user_id = $1").bind(id).execute(&state.pg).await?;
     Ok(())
+}
+
+/// Pins (or, with `node_label: None`, unpins) all of a user's future
+/// launches to nodes carrying a given "key=value" label — see
+/// `deployments::create_deployment`, which reads it off `CurrentUser` at
+/// launch time. Existing Deployments are untouched; this only affects new
+/// launches, same as every other launch-time-fixed setting in this app.
+pub async fn set_node_label(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Path(id): Path<i32>,
+    Json(req): Json<SetNodeLabelRequest>,
+) -> Result<Json<UserInfo>, ApiError> {
+    if let Some(label) = &req.node_label {
+        validate::node_label(label)?;
+    }
+    let node_label = req.node_label.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let row: Option<UserRow> =
+        sqlx::query_as("UPDATE users SET node_label = $1 WHERE id = $2 RETURNING id, username, role, node_label")
+            .bind(&node_label)
+            .bind(id)
+            .fetch_optional(&state.pg)
+            .await?;
+    let row = row.ok_or_else(|| ApiError::BadRequest(format!("user {id} not found")))?;
+    Ok(Json(row.into()))
 }

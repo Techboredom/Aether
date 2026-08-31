@@ -295,6 +295,17 @@ pub struct UserInfo {
     pub id: i32,
     pub username: String,
     pub role: Role,
+    /// An admin-set "key=value" node label. When present, every Deployment
+    /// this user launches gets a matching `nodeSelector`, pinning their
+    /// workloads to nodes carrying that label. `None` means unrestricted.
+    pub node_label: Option<String>,
+}
+
+/// Submitted by the Users admin tab to set or clear a user's node label.
+/// `node_label: None` clears it back to unrestricted placement.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SetNodeLabelRequest {
+    pub node_label: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

@@ -131,6 +131,46 @@ pub fn username(value: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// A Kubernetes node label in `key=value` form, e.g. `node-type=cpu` or
+/// `nvidia.com/gpu.product=H100`. The key follows the label-key grammar (an
+/// optional DNS-subdomain prefix, `/`, then a DNS-1123-ish name segment); the
+/// value follows the label-value grammar (same character set as the name
+/// segment, may be empty). This is a practical subset of the full spec, not
+/// exhaustive — the Kubernetes API server is the final authority when the
+/// nodeSelector is actually applied.
+pub fn node_label(value: &str) -> Result<(), ApiError> {
+    let bad_label = || bad("node_label", "must look like \"key=value\", e.g. \"node-type=cpu\"");
+
+    fn is_segment(s: &str) -> bool {
+        if s.is_empty() || s.len() > 63 {
+            return false;
+        }
+        let bytes = s.as_bytes();
+        let is_alnum = |b: u8| b.is_ascii_alphanumeric();
+        is_alnum(bytes[0])
+            && is_alnum(bytes[bytes.len() - 1])
+            && bytes.iter().all(|&b| is_alnum(b) || b == b'-' || b == b'_' || b == b'.')
+    }
+
+    let trimmed = value.trim();
+    if trimmed.len() > 317 {
+        return Err(bad_label());
+    }
+    let Some((key, val)) = trimmed.split_once('=') else {
+        return Err(bad_label());
+    };
+    let key_ok = match key.split_once('/') {
+        Some((prefix, name)) => {
+            !prefix.is_empty() && prefix.len() <= 253 && prefix.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.') && is_segment(name)
+        }
+        None => is_segment(key),
+    };
+    if !key_ok || (!val.is_empty() && !is_segment(val)) {
+        return Err(bad_label());
+    }
+    Ok(())
+}
+
 pub fn password(value: &str) -> Result<(), ApiError> {
     if value.len() < 8 {
         return Err(bad("password", "must be at least 8 characters"));

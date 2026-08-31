@@ -85,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/users", get(users::list_users).post(users::create_user))
         .route("/api/users/{id}", axum::routing::delete(users::delete_user))
         .route("/api/users/{id}/password", put(users::reset_password))
+        .route("/api/users/{id}/node-label", put(users::set_node_label))
         .route("/api/pods", get(ws::list_pods))
         .route("/api/images", get(images::list_images).post(images::create_image))
         .route("/api/images/{id}", put(images::update_image).delete(images::delete_image))
