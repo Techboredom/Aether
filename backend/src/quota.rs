@@ -13,20 +13,27 @@ use crate::state::AppState;
 use crate::validate;
 
 #[derive(Default)]
-struct GlobalSettings {
-    limits: QuotaLimits,
-    expose_resource_requests: bool,
+pub struct GlobalSettings {
+    pub limits: QuotaLimits,
+    pub expose_resource_requests: bool,
+    pub fixed_cpu_request: Option<String>,
+    pub fixed_memory_request: Option<String>,
 }
 
-async fn load_global_settings(pg: &PgPool) -> Result<GlobalSettings, ApiError> {
-    let row: (Option<String>, Option<String>, Option<i32>, bool) = sqlx::query_as(
-        "SELECT cpu_limit, memory_limit, gpu_limit, expose_resource_requests FROM quota_settings WHERE id = 1",
+type GlobalSettingsRow = (Option<String>, Option<String>, Option<i32>, bool, Option<String>, Option<String>);
+
+pub async fn load_global_settings(pg: &PgPool) -> Result<GlobalSettings, ApiError> {
+    let row: GlobalSettingsRow = sqlx::query_as(
+        "SELECT cpu_limit, memory_limit, gpu_limit, expose_resource_requests, fixed_cpu_request, fixed_memory_request \
+         FROM quota_settings WHERE id = 1",
     )
     .fetch_one(pg)
     .await?;
     Ok(GlobalSettings {
         limits: QuotaLimits { cpu_limit: row.0, memory_limit: row.1, gpu_limit: row.2 },
         expose_resource_requests: row.3,
+        fixed_cpu_request: row.4,
+        fixed_memory_request: row.5,
     })
 }
 
@@ -149,12 +156,17 @@ fn validate_limits(limits: &QuotaLimits) -> Result<(), ApiError> {
 /// `expose_resource_requests` regardless of role.
 pub async fn my_quota(user: CurrentUser, State(state): State<AppState>) -> Result<Json<MyQuota>, ApiError> {
     let (limits, is_override, expose_resource_requests) = effective_quota(&state, &user).await?;
+    // Fixed requests are a global-only setting (not per-user), and purely
+    // informational here — the frontend never sends them back.
+    let global = load_global_settings(&state.pg).await?;
     let pods = state.snapshot().await;
     let (used_cpu, used_mem, used_gpu) = usage_from_pods(&pods, &user.username, None);
     Ok(Json(MyQuota {
         limits,
         is_override,
         expose_resource_requests,
+        fixed_cpu_request: global.fixed_cpu_request,
+        fixed_memory_request: global.fixed_memory_request,
         used_cpu_millicores: used_cpu,
         used_memory_bytes: used_mem,
         used_gpu_count: used_gpu,
@@ -163,7 +175,12 @@ pub async fn my_quota(user: CurrentUser, State(state): State<AppState>) -> Resul
 
 pub async fn get_settings(_admin: AdminUser, State(state): State<AppState>) -> Result<Json<QuotaSettings>, ApiError> {
     let global = load_global_settings(&state.pg).await?;
-    Ok(Json(QuotaSettings { limits: global.limits, expose_resource_requests: global.expose_resource_requests }))
+    Ok(Json(QuotaSettings {
+        limits: global.limits,
+        expose_resource_requests: global.expose_resource_requests,
+        fixed_cpu_request: global.fixed_cpu_request,
+        fixed_memory_request: global.fixed_memory_request,
+    }))
 }
 
 pub async fn update_settings(
@@ -172,14 +189,22 @@ pub async fn update_settings(
     Json(req): Json<QuotaSettings>,
 ) -> Result<Json<QuotaSettings>, ApiError> {
     validate_limits(&req.limits)?;
+    if let Some(v) = &req.fixed_cpu_request {
+        validate::quantity("fixed_cpu_request", v)?;
+    }
+    if let Some(v) = &req.fixed_memory_request {
+        validate::quantity("fixed_memory_request", v)?;
+    }
     sqlx::query(
         "UPDATE quota_settings SET cpu_limit = $1, memory_limit = $2, gpu_limit = $3, \
-         expose_resource_requests = $4 WHERE id = 1",
+         expose_resource_requests = $4, fixed_cpu_request = $5, fixed_memory_request = $6 WHERE id = 1",
     )
     .bind(&req.limits.cpu_limit)
     .bind(&req.limits.memory_limit)
     .bind(req.limits.gpu_limit)
     .bind(req.expose_resource_requests)
+    .bind(&req.fixed_cpu_request)
+    .bind(&req.fixed_memory_request)
     .execute(&state.pg)
     .await?;
     Ok(Json(req))

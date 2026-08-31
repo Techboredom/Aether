@@ -5,7 +5,7 @@ use leptos::tachys::dom::event_target_value;
 use leptos::task::spawn_local;
 
 use crate::env_editor::{EnvVars, EnvVarsEditor};
-use crate::format::quota_summary;
+use crate::format::{fixed_request_note, quota_summary};
 
 /// Scale/edit/delete controls for a Deployment, shown in the pod detail panel
 /// for any pod that has one (`PodInfo::deployment_name`). The backend is the
@@ -155,6 +155,11 @@ pub fn ManageDeploymentSection(deployment_name: String, selected: RwSignal<Optio
 
                             {move || {
                                 my_quota.get().map(|q| view! { <p class="hint">{quota_summary(&q)}</p> })
+                            }}
+                            {move || {
+                                my_quota.get().and_then(|q| fixed_request_note(&q)).map(|note| {
+                                    view! { <p class="hint">{note}</p> }
+                                })
                             }}
 
                             <fieldset>

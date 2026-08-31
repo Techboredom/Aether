@@ -14,6 +14,8 @@ pub fn QuotasTab() -> impl IntoView {
     let global_memory_limit = RwSignal::new(String::new());
     let global_gpu_limit = RwSignal::new(String::new());
     let expose_resource_requests = RwSignal::new(true);
+    let fixed_cpu_request = RwSignal::new(String::new());
+    let fixed_memory_request = RwSignal::new(String::new());
     let settings_saving = RwSignal::new(false);
     let settings_result: RwSignal<Option<Result<String, String>>> = RwSignal::new(None);
 
@@ -37,6 +39,8 @@ pub fn QuotasTab() -> impl IntoView {
                         global_memory_limit.set(s.limits.memory_limit.unwrap_or_default());
                         global_gpu_limit.set(s.limits.gpu_limit.map(|v| v.to_string()).unwrap_or_default());
                         expose_resource_requests.set(s.expose_resource_requests);
+                        fixed_cpu_request.set(s.fixed_cpu_request.unwrap_or_default());
+                        fixed_memory_request.set(s.fixed_memory_request.unwrap_or_default());
                     }
                     Err(err) => settings_error.set(Some(format!("failed to parse quota settings: {err}"))),
                 },
@@ -77,6 +81,8 @@ pub fn QuotasTab() -> impl IntoView {
                 gpu_limit: non_empty(global_gpu_limit.get()).and_then(|v| v.parse().ok()),
             },
             expose_resource_requests: expose_resource_requests.get(),
+            fixed_cpu_request: non_empty(fixed_cpu_request.get()),
+            fixed_memory_request: non_empty(fixed_memory_request.get()),
         };
         settings_saving.set(true);
         settings_result.set(None);
@@ -170,8 +176,28 @@ pub fn QuotasTab() -> impl IntoView {
                             prop:checked=move || expose_resource_requests.get()
                             on:change=move |ev| expose_resource_requests.set(event_target_checked(&ev))
                         />
-                        "Show separate CPU/memory \"request\" fields on the Launch tab and the Pods tab's manage panel (unchecking hides them — Kubernetes then defaults a container's request to match its limit)"
+                        "Show separate CPU/memory \"request\" fields on the Launch tab and the Pods tab's manage panel (unchecking hides them and applies the fixed requests below to every launch/edit instead)"
                     </label>
+                    <Show when=move || !expose_resource_requests.get()>
+                        <label>
+                            "Fixed CPU request (optional)"
+                            <input
+                                type="text"
+                                placeholder="e.g. 100m — blank leaves the request unset (Kubernetes then defaults it to match the limit)"
+                                prop:value=move || fixed_cpu_request.get()
+                                on:input=move |ev| fixed_cpu_request.set(event_target_value(&ev))
+                            />
+                        </label>
+                        <label>
+                            "Fixed memory request (optional)"
+                            <input
+                                type="text"
+                                placeholder="e.g. 128Mi — blank leaves the request unset"
+                                prop:value=move || fixed_memory_request.get()
+                                on:input=move |ev| fixed_memory_request.set(event_target_value(&ev))
+                            />
+                        </label>
+                    </Show>
                     <div class="form-actions">
                         <button type="submit" disabled=move || settings_saving.get()>
                             {move || if settings_saving.get() { "Saving…" } else { "Save global quota" }}
