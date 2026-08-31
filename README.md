@@ -167,10 +167,11 @@ additionally require the `admin` role (403 otherwise).
 - `POST /api/logout` — clears the session (both server-side and the cookie)
 - `GET /api/me` — returns the current `UserInfo` (`{id, username, role}`), or 401 if not logged in — this is what the frontend polls on load to decide whether to show the login page
 - `PUT /api/me/password` — body `{current_password, new_password}`; changes your own password, 400 if `current_password` doesn't match. Deletes every other session for your account (`DELETE FROM sessions WHERE user_id = $1 AND token != $2`) but leaves the one making this request logged in.
-- `GET /api/users` *(admin)* — list accounts (id, username, role — never password hashes)
+- `GET /api/users` *(admin)* — list accounts (id, username, role, node_label — never password hashes)
 - `POST /api/users` *(admin)* — create an account; body `{username, password, role}` (`role` is `"admin"` or `"user"`); username 3-32 chars, password ≥ 8 chars
 - `DELETE /api/users/{id}` *(admin)* — delete an account; an admin can't delete their own account (guards against an easy self-lockout)
 - `PUT /api/users/{id}/password` *(admin)* — body `{password}`; resets another account's password without needing the old one — the admin role itself is the authorization. Deletes **all** of that account's sessions (there's no "current session" to preserve, since it isn't the admin's own).
+- `PUT /api/users/{id}/node-label` *(admin)* — body `{node_label}`, a `"key=value"` string (e.g. `"node-type=cpu"`) or `null` to clear it. Every Deployment that account launches afterward gets a matching `nodeSelector`, pinning its pods to nodes carrying that label; `null` (the default for a new account) leaves placement unrestricted. Only affects future launches — see "Per-user node placement" below.
 - `GET /api/pods` — JSON snapshot of the current pods in the watched namespace, filtered by role: a `user` only gets pods whose `aether.io/owner` label matches their own username, an `admin` gets all of them (each with its `owner` field populated). Pods for templates with a `secret_env_key` also carry a `credential: {env_key, value}` looked up from `deployment_secrets`, and pods for proxy-enabled templates carry a `proxy_path: "/proxy/<name>/"`.
 - `GET /ws` — WebSocket; sends a full snapshot on connect (same per-role filtering and credential enrichment as `GET /api/pods`), then `upsert`/`delete` events as pods change, filtered the same way per-connection
 - `GET /api/images` — JSON list of catalog entries from the `images` table (id, name, image, description)
@@ -463,6 +464,29 @@ Scaling or editing an existing deployment excludes *that deployment's own*
 current usage from the baseline before adding its proposed new footprint,
 so raising its own replica count or limits is judged only against what it
 would become, not double-counted against what it already is.
+
+## Per-user node placement
+
+An admin can pin a user's workloads to a specific subset of nodes by
+setting a **node label** on their account from the Users tab —
+`"key=value"` (e.g. `node-type=cpu`, or `accelerator=amd` to keep someone
+on the AMD GPU node), matching an actual label already on some subset of
+the cluster's nodes. Every Deployment that account launches afterward gets
+a `nodeSelector` with that single key/value pair
+(`backend/src/deployments.rs::node_selector_for`, set on the pod template
+in `create_deployment`); the Kubernetes scheduler then refuses to place
+its pods anywhere else. Clearing the label (set it to `null`/empty)
+returns the account to unrestricted placement for future launches.
+
+Like the image/accelerator/args fields, the selector is fixed at launch
+time from whatever the label was *then* — it isn't retroactively applied
+to already-running deployments if an admin changes it later, and
+`update_deployment` never touches it (only `replicas`/`resources`/`env`
+are editable post-launch). This is validated server-side
+(`validate::node_label`) as a practical subset of the real Kubernetes
+label-key/value grammar, admin-only (`PUT /api/users/{id}/node-label`),
+and otherwise invisible to the affected user — no UI surfaces it to them,
+since it's a placement decision, not something they need to act on.
 
 ## Activity logging
 
@@ -866,8 +890,17 @@ configured fixed value (not defaulted up to match the limit), an edit
 raising that same deployment's limit left its request untouched at the
 fixed value, and re-enabling `expose_resource_requests` and launching with
 an explicit request confirmed that value was honored normally again (no
-fixed-request interference once the toggle is back on). Known gaps, in
-case they matter for what you do next:
+fixed-request interference once the toggle is back on). Per-user node
+placement was verified against the real cluster: setting a test account's
+node label to `node-type=cpu` (a label that actually exists on this
+cluster's worker nodes) and launching as that account produced a
+Deployment whose `spec.template.spec.nodeSelector` was exactly
+`{"node-type":"cpu"}` via `kubectl`, with its pod scheduled onto a matching
+node; clearing the label and relaunching produced no `nodeSelector` at all;
+malformed label values (no `=`, illegal characters) were rejected with 400;
+a non-admin account got 403 attempting to set it; and a Puppeteer pass
+confirmed the Users tab's new "Node label" column and edit form render and
+save correctly. Known gaps, in case they matter for what you do next:
 
 - **Still no "forgot password" self-service flow** — that requires emailing
   a reset link, which this app has no mechanism for (no SMTP config, no

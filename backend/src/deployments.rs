@@ -25,6 +25,15 @@ use crate::validate;
 /// is; anyone else only for a deployment carrying their own `OWNER_LABEL`.
 /// A deployment with no owner label at all (predates Aether, or wasn't
 /// launched through it) can only be managed by an admin.
+/// Parses a user's admin-set "key=value" node label (validated at
+/// write-time by `validate::node_label`, so this only ever sees a
+/// well-formed value) into the single-entry map `PodSpec::node_selector`
+/// expects. `None` if the user has no node label set.
+fn node_selector_for(user: &CurrentUser) -> Option<BTreeMap<String, String>> {
+    let (key, value) = user.node_label.as_deref()?.split_once('=')?;
+    Some(BTreeMap::from([(key.to_string(), value.to_string())]))
+}
+
 fn check_owner(deployment: &Deployment, user: &CurrentUser) -> Result<(), ApiError> {
     if user.role == Role::Admin {
         return Ok(());
@@ -173,6 +182,7 @@ pub async fn create_deployment(
                     ..Default::default()
                 }),
                 spec: Some(PodSpec {
+                    node_selector: node_selector_for(&user),
                     containers: vec![Container {
                         name: req.name.clone(),
                         image: Some(req.image.clone()),
