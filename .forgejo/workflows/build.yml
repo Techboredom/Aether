@@ -32,13 +32,37 @@ jobs:
       - name: Build image
         run: |
           TAG="$(git rev-parse --short HEAD)"
+          # BUILD_TAG is Forgejo's own ever-increasing run counter - a
+          # readable version number with zero manual effort, distinct from
+          # TAG (the commit SHA) so a rebuild of the exact same commit
+          # (e.g. workflow_dispatch) still gets a fresh version number
+          # rather than being indistinguishable from the original build.
+          BUILD_TAG="v${{ github.run_number }}"
           echo "TAG=$TAG" >> "$GITHUB_ENV"
-          docker build -t "$IMAGE:$TAG" -t "$IMAGE:latest" .
+          echo "BUILD_TAG=$BUILD_TAG" >> "$GITHUB_ENV"
+
+          TAG_ARGS=(-t "$IMAGE:$TAG" -t "$IMAGE:$BUILD_TAG" -t "$IMAGE:latest")
+
+          # A deliberate release: pushing a "vX.Y.Z" git tag additionally
+          # tags the image with that exact version, alongside (not instead
+          # of) the always-present SHA/build-number tags above.
+          REF="${{ github.ref }}"
+          if [[ "$REF" == refs/tags/* ]]; then
+            RELEASE_TAG="${REF#refs/tags/}"
+            echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+            TAG_ARGS+=(-t "$IMAGE:$RELEASE_TAG")
+          fi
+
+          docker build "${TAG_ARGS[@]}" .
 
       - name: Push image
         run: |
           docker push "$IMAGE:$TAG"
+          docker push "$IMAGE:$BUILD_TAG"
           docker push "$IMAGE:latest"
+          if [ -n "${RELEASE_TAG:-}" ]; then
+            docker push "$IMAGE:$RELEASE_TAG"
+          fi
 
       - name: Log out
         if: always()
@@ -98,5 +122,5 @@ jobs:
         if: always()
         run: |
           rm -rf /tmp/aether-deploy "$PWD/kustomize"
-          docker image rm -f "$IMAGE:$TAG" "$IMAGE:latest" 2>/dev/null || true
+          docker image rm -f "$IMAGE:$TAG" "$IMAGE:$BUILD_TAG" "$IMAGE:latest" ${RELEASE_TAG:+"$IMAGE:$RELEASE_TAG"} 2>/dev/null || true
           docker image prune -f

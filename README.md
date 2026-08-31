@@ -559,8 +559,18 @@ no shell, runs as a non-root user.
 `ctr.int.example.com:8443/aether/aether` (the `aether` project in
 Harbor, repository also named `aether` — deliberately not `aether-web` or
 `aether-app`, since there's only one image this whole project produces) on
-every push to `main`, on version tags (`v*`), or via manual dispatch. It
-tags the image with both the short git SHA and `latest`.
+every push to `main`, on version tags (`v*`), or via manual dispatch.
+
+Every build gets tagged with three things: the short git SHA (immutable,
+never overwritten — this is what actually gets deployed, see below),
+`v<run number>` (Forgejo's own ever-increasing per-workflow counter, e.g.
+`v42` — a free, zero-effort human-readable version bumped on every single
+run, including a `workflow_dispatch` re-run of the same commit), and
+`latest` (which does move, by definition — nothing pulls it for anything
+that matters, since the deploy path always pins to the SHA tag). Pushing a
+`vX.Y.Z` git tag additionally tags that specific build with the exact
+version string (e.g. `v1.4.0`), for deliberate, human-chosen releases —
+alongside the other three tags, not instead of them.
 
 After a successful push, the same job also bumps the deploy: it clones the
 separate **Aether-Deploy** repo (see "GitOps deploy" below — that's where
@@ -571,7 +581,9 @@ changed anything — commits and pushes that one file straight to
 Aether-Deploy's `main`. Argo CD is what actually notices that commit and
 rolls the cluster forward. This job never touches the cluster itself, or
 even this repo's own `main` — only the registry and Aether-Deploy's git
-history.
+history. Deploys always pin to the SHA tag specifically (not `v<run
+number>` or a release tag) — it's the one tag guaranteed to exist for
+every single build with no extra logic needed to pick the "right" one.
 
 Requires three repository secrets in Forgejo (Settings → Actions → Secrets):
 
