@@ -208,3 +208,72 @@ pub fn parse_count(q: &Quantity) -> Option<i64> {
     let s = q.0.trim();
     s.parse::<i64>().ok().or_else(|| s.parse::<f64>().ok().map(|v| v.round() as i64))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn q(s: &str) -> Quantity {
+        Quantity(s.to_string())
+    }
+
+    #[test]
+    fn parses_cpu_in_every_unit_kubernetes_accepts() {
+        assert_eq!(parse_cpu_millicores(&q("500m")), Some(500));
+        assert_eq!(parse_cpu_millicores(&q("2")), Some(2000));
+        assert_eq!(parse_cpu_millicores(&q("0.5")), Some(500));
+        assert_eq!(parse_cpu_millicores(&q("1500u")), Some(2)); // micro -> milli, rounded
+        assert_eq!(parse_cpu_millicores(&q("1000000n")), Some(1)); // nano -> milli
+        assert_eq!(parse_cpu_millicores(&q("  250m  ")), Some(250));
+    }
+
+    #[test]
+    fn rejects_cpu_it_cannot_parse() {
+        assert_eq!(parse_cpu_millicores(&q("")), None);
+        assert_eq!(parse_cpu_millicores(&q("abc")), None);
+        assert_eq!(parse_cpu_millicores(&q("m")), None);
+    }
+
+    #[test]
+    fn parses_binary_memory_suffixes() {
+        assert_eq!(parse_memory_bytes(&q("1Ki")), Some(1024));
+        assert_eq!(parse_memory_bytes(&q("1Mi")), Some(1024 * 1024));
+        assert_eq!(parse_memory_bytes(&q("512Mi")), Some(512 * 1024 * 1024));
+        assert_eq!(parse_memory_bytes(&q("1Gi")), Some(1024 * 1024 * 1024));
+        assert_eq!(parse_memory_bytes(&q("2Ti")), Some(2 * 1024_i64.pow(4)));
+    }
+
+    #[test]
+    fn parses_decimal_memory_suffixes_distinctly_from_binary() {
+        // The classic mixup: 1M is 1e6, 1Mi is 1048576. Conflating them
+        // would silently misreport every quota.
+        assert_eq!(parse_memory_bytes(&q("1M")), Some(1_000_000));
+        assert_eq!(parse_memory_bytes(&q("1G")), Some(1_000_000_000));
+        assert_ne!(parse_memory_bytes(&q("1M")), parse_memory_bytes(&q("1Mi")));
+    }
+
+    #[test]
+    fn parses_bare_byte_counts() {
+        assert_eq!(parse_memory_bytes(&q("128974848")), Some(128_974_848));
+        assert_eq!(parse_memory_bytes(&q("")), None);
+        assert_eq!(parse_memory_bytes(&q("abc")), None);
+    }
+
+    #[test]
+    fn parses_accelerator_counts() {
+        assert_eq!(parse_count(&q("1")), Some(1));
+        assert_eq!(parse_count(&q("8")), Some(8));
+        assert_eq!(parse_count(&q("2.0")), Some(2));
+        assert_eq!(parse_count(&q("")), None);
+    }
+
+    #[test]
+    fn recognizes_accelerator_resources_by_vendor_prefix() {
+        assert!(is_accelerator_resource("nvidia.com/gpu"));
+        assert!(is_accelerator_resource("amd.com/gpu"));
+        assert!(is_accelerator_resource("gpu.intel.com/i915"));
+        assert!(!is_accelerator_resource("cpu"));
+        assert!(!is_accelerator_resource("memory"));
+        assert!(!is_accelerator_resource("ephemeral-storage"));
+    }
+}

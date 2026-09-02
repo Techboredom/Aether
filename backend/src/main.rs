@@ -22,7 +22,6 @@ use axum::Router;
 use clap::Parser;
 use kube::Client;
 use sqlx::postgres::PgPoolOptions;
-use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
@@ -55,9 +54,10 @@ struct Args {
     admin_bootstrap_password: Option<String>,
 
     /// Public origin this app is served from, e.g.
-    /// "https://aether.example.com". Must be set together with
-    /// `--proxy-base-domain`.
-    #[arg(long, env = "APP_ORIGIN", requires = "proxy_base_domain")]
+    /// "https://aether.example.com". Set this whenever the app is
+    /// served over HTTPS: its scheme is what allows session cookies to be
+    /// marked `Secure`. Required by `--proxy-base-domain`.
+    #[arg(long, env = "APP_ORIGIN")]
     app_origin: Option<String>,
 
     /// Base domain for per-deployment proxy origins, e.g.
@@ -110,8 +110,17 @@ async fn main() -> anyhow::Result<()> {
         ),
     }
 
-    let state = AppState::new(args.namespace.clone(), client.clone(), pg, proxy_origin);
+    let app_origin = args.app_origin.as_ref().map(|origin| origin.trim_end_matches('/').to_string());
+    if app_origin.as_deref().map(|o| o.starts_with("http://")).unwrap_or(true) {
+        tracing::warn!(
+            "APP_ORIGIN is unset or not https — session cookies can't be marked Secure, so they travel in \
+             cleartext over any plain-HTTP hop"
+        );
+    }
+
+    let state = AppState::new(args.namespace.clone(), client.clone(), pg, app_origin, proxy_origin);
     tokio::spawn(watch::run(state.clone(), client));
+    tokio::spawn(prune_expired_credentials(state.clone()));
 
     let index_html = format!("{}/index.html", args.static_dir);
     let static_service = ServeDir::new(&args.static_dir).fallback(ServeFile::new(&index_html));
@@ -157,7 +166,11 @@ async fn main() -> anyhow::Result<()> {
         // actually exists. See proxy::start_proxy_auth.
         .route("/proxy-auth", get(proxy::start_proxy_auth))
         .fallback_service(static_service)
-        .layer(CorsLayer::permissive())
+        // No CORS layer: the frontend is served by this same process, so
+        // every call it makes is same-origin. `trunk serve` proxies to the
+        // backend server-side during development, which CORS never sees
+        // either. Adding a permissive policy would only widen what other
+        // sites can do with a logged-in browser.
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone())
         // Outermost, so a request to a deployment's own origin is served as
@@ -172,6 +185,38 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
 
     Ok(())
+}
+
+/// Deletes credentials that have already expired. Nothing reads them once
+/// they're past `expires_at` — every lookup filters on it — so this is purely
+/// to stop the tables growing without bound.
+///
+/// Deliberately limited to expired *credentials*. The `session_log` and
+/// `launch_log` audit tables are left alone: how long to keep those is a
+/// retention decision (they record who logged in from where), not something
+/// to silently discard here.
+async fn prune_expired_credentials(state: AppState) {
+    const PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+    let mut ticker = tokio::time::interval(PRUNE_INTERVAL);
+    loop {
+        ticker.tick().await;
+        // Written out rather than looped over a table name, because sqlx
+        // (rightly) refuses to take SQL built at runtime.
+        let statements: [(&str, _); 3] = [
+            ("sessions", sqlx::query("DELETE FROM sessions WHERE expires_at < now()")),
+            ("proxy_auth_tokens", sqlx::query("DELETE FROM proxy_auth_tokens WHERE expires_at < now()")),
+            ("proxy_sessions", sqlx::query("DELETE FROM proxy_sessions WHERE expires_at < now()")),
+        ];
+        for (table, statement) in statements {
+            match statement.execute(&state.pg).await {
+                Ok(result) if result.rows_affected() > 0 => {
+                    tracing::info!(table, removed = result.rows_affected(), "pruned expired rows");
+                }
+                Ok(_) => {}
+                Err(err) => tracing::warn!(table, error = %err, "failed to prune expired rows"),
+            }
+        }
+    }
 }
 
 /// Creates the initial "admin" account if (and only if) no users exist yet.

@@ -145,6 +145,25 @@ Open `http://localhost:3000`, log in as `admin`. Auth to the cluster
 auto-detects: in-cluster service account first, falling back to your local
 kubeconfig (`~/.kube/config`, current context) — the same as `kubectl`.
 
+### Tests
+
+`cargo test -p backend -p common` runs the unit tests. They cover the logic
+that's cheap to get subtly wrong and expensive to notice: quantity parsing
+(binary vs. decimal suffixes), every input-validation rule, quota accounting
+(replicas x limits, per-owner grouping, exclude-self), proxy-origin host
+matching, the login throttle, and the proxy's credential stripping. None of
+them need a database or a cluster.
+
+Anything that *does* need a cluster — actually launching a Deployment,
+reaching a pod through the proxy — is still exercised by hand against the
+real one; see "Status & known limitations".
+
+CI runs these plus `clippy -D warnings` (backend, common, and the frontend's
+wasm target) before it builds an image, so a failure there stops the build
+rather than shipping. `cargo fmt` is *not* enforced — the tree isn't
+currently rustfmt-clean, and reformatting it wholesale would bury real
+changes in noise.
+
 ### Backend configuration
 
 All flags can also be set as environment variables:
@@ -826,14 +845,18 @@ starts managing more than this one app.
   (including any XSS) can't read it, and cross-site requests can't ride on
   it. Sessions last 7 days and aren't refreshed on activity; logging out
   deletes the row server-side, not just the cookie.
-- The cookie is **not** marked `Secure` — this cluster has no TLS anywhere
-  (see "Status & known limitations"), and a `Secure` cookie would simply
-  never be sent over the plain-HTTP LoadBalancer this app is reached
-  through. In this network, the session token (and the login password on
-  the wire) are only as protected as the network itself.
-- There's no rate limiting on `POST /api/login` — nothing stops password
-  guessing beyond whatever's normal for your account's password strength
-  (enforced at creation: ≥ 8 characters, nothing more).
+- The cookie is marked `Secure` when `APP_ORIGIN` is an `https://` URL, and
+  not otherwise — a `Secure` cookie is never sent back over plain HTTP, so
+  setting it unconditionally would lock out a plain-HTTP deployment entirely.
+  Configure `APP_ORIGIN` as soon as the app is served over TLS; until then the
+  session token and the login password are only as protected as the network,
+  and the backend logs a warning at startup saying so.
+- `POST /api/login` is rate limited per source address: 10 failures within 5
+  minutes and further attempts are refused with 429 without the password
+  being checked at all. That slows guessing, and also caps an unauthenticated
+  CPU drain — verifying a password runs argon2, which is expensive by design,
+  so junk logins would otherwise be a cheap way to saturate the server. A
+  successful login clears the address's history.
 - The app-level `admin`/`user` roles gate *application* actions (Templates,
   Users, Launch) and are unrelated to Kubernetes RBAC below, which gates
   what the backend's own ServiceAccount can do to the cluster regardless of
@@ -920,12 +943,25 @@ IP directly over plain TCP like any other in-cluster client would.
   convenience only, and the backend logs a warning at startup when it is.
 - The container runs as a non-root user with a read-only root filesystem and
   all Linux capabilities dropped.
-- `CorsLayer::permissive()` is enabled on the backend to make local `trunk
-  serve` dev proxying easy. It sets `Access-Control-Allow-Origin: *` without
-  `Access-Control-Allow-Credentials`, which per the Fetch spec means
-  browsers won't expose credentialed cross-origin responses to another
-  site's JS — CSRF protection here actually comes from the cookie's
-  `SameSite=Lax`, not from this CORS policy.
+- **No CORS layer at all.** The frontend is served by this same process, so
+  every call it makes is same-origin, and `trunk serve` proxies to the backend
+  server-side during development, which CORS never sees either. (A permissive
+  policy used to be set here for dev convenience; it only widened what other
+  sites could attempt with a logged-in browser.) CSRF protection comes from
+  the cookie's `SameSite=Lax`.
+- **Internal error detail stays in the logs.** Database and cluster-transport
+  failures are logged server-side and answered with a generic message —
+  a `sqlx` error quotes SQL and column names straight back at whoever
+  triggered it. Kubernetes *API* errors are still passed through, since those
+  are the API server's own validation messages ("already exists", "must be no
+  more than ..."), which are the most useful thing to show and reveal nothing
+  the caller couldn't learn by asking it directly.
+- **Expired credentials are pruned hourly** (`sessions`, `proxy_auth_tokens`,
+  `proxy_sessions`) — nothing reads them once past `expires_at`, so this only
+  stops the tables growing without bound. The `session_log` and `launch_log`
+  audit tables are deliberately left alone: how long to keep records of who
+  logged in from where is a retention decision, not something to discard
+  silently.
 
 ## Status & known limitations
 

@@ -1,10 +1,13 @@
 use axum::extract::{Path, State};
 use axum::Json;
 use common::{CreateUserRequest, ResetPasswordRequest, Role, SetNodeLabelRequest, UserInfo};
+use k8s_openapi::api::apps::v1::Deployment;
+use kube::api::{Api, ListParams};
 use sqlx::FromRow;
 
 use crate::auth::{hash_password, AdminUser};
 use crate::error::ApiError;
+use crate::resources::OWNER_LABEL;
 use crate::state::AppState;
 use crate::validate;
 
@@ -66,6 +69,30 @@ pub async fn delete_user(admin: AdminUser, State(state): State<AppState>, Path(i
     if admin.0.id == id {
         return Err(ApiError::BadRequest("you can't delete your own account".to_string()));
     }
+
+    let username: Option<String> =
+        sqlx::query_scalar("SELECT username FROM users WHERE id = $1").bind(id).fetch_optional(&state.pg).await?;
+    let Some(username) = username else {
+        return Err(ApiError::BadRequest(format!("user {id} not found")));
+    };
+
+    // Deleting the row cascades to their sessions and quota override, but
+    // says nothing to Kubernetes: their Deployments would keep running,
+    // keep consuming the cluster, and become invisible in the UI, since
+    // every view is filtered by an owner that no longer exists. Refuse
+    // rather than either leaking workloads or silently destroying them —
+    // which of those the admin wants is their call to make, explicitly.
+    let deployments: Api<Deployment> = Api::namespaced(state.client.clone(), &state.namespace);
+    let owned = deployments.list(&ListParams::default().labels(&format!("{OWNER_LABEL}={username}"))).await?;
+    if !owned.items.is_empty() {
+        let names: Vec<&str> = owned.items.iter().filter_map(|d| d.metadata.name.as_deref()).collect();
+        return Err(ApiError::BadRequest(format!(
+            "\"{username}\" still has {} running deployment(s): {} — delete them first",
+            names.len(),
+            names.join(", ")
+        )));
+    }
+
     sqlx::query("DELETE FROM users WHERE id = $1").bind(id).execute(&state.pg).await?;
     Ok(())
 }

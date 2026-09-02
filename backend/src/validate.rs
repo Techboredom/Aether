@@ -180,3 +180,125 @@ pub fn password(value: &str) -> Result<(), ApiError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn is_ok(result: Result<(), ApiError>) -> bool {
+        result.is_ok()
+    }
+
+    #[test]
+    fn accepts_valid_kubernetes_names() {
+        for name in ["a", "my-app", "jupyter01", &"a".repeat(63)] {
+            assert!(is_ok(k8s_name("name", name)), "should accept {name}");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_kubernetes_names() {
+        // Uppercase and underscores are the two people actually try; the
+        // path-shaped ones would otherwise reach the API server in a URL.
+        for name in ["", "My-App", "my_app", "-leading", "trailing-", &"a".repeat(64), "../etc", "a/b"] {
+            assert!(!is_ok(k8s_name("name", name)), "should reject {name:?}");
+        }
+    }
+
+    #[test]
+    fn accepts_kubernetes_quantities() {
+        for value in ["500m", "2", "0.5", "512Mi", "1Gi", "128974848"] {
+            assert!(is_ok(quantity("cpu", value)), "should accept {value}");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_quantities() {
+        for value in ["abc", "1.2.3", "12x", &"1".repeat(21)] {
+            assert!(!is_ok(quantity("cpu", value)), "should reject {value:?}");
+        }
+    }
+
+    #[test]
+    fn treats_an_empty_quantity_as_unset() {
+        // Callers normalize empty to None before it reaches Kubernetes; see
+        // deployments::normalize_quantity.
+        assert!(is_ok(quantity("cpu", "")));
+    }
+
+    #[test]
+    fn env_keys_must_look_like_shell_identifiers() {
+        for key in ["PATH", "_private", "JUPYTER_TOKEN", "a1"] {
+            assert!(is_ok(env_key(key)), "should accept {key}");
+        }
+        for key in ["", "1LEADING", "has-dash", "has space", "has=equals"] {
+            assert!(!is_ok(env_key(key)), "should reject {key:?}");
+        }
+    }
+
+    #[test]
+    fn container_ports_must_be_in_range() {
+        assert!(is_ok(container_port(1)));
+        assert!(is_ok(container_port(8888)));
+        assert!(is_ok(container_port(65535)));
+        assert!(!is_ok(container_port(0)));
+        assert!(!is_ok(container_port(-1)));
+        assert!(!is_ok(container_port(65536)));
+    }
+
+    #[test]
+    fn usernames_double_as_kubernetes_label_values() {
+        for name in ["alice", "bob.smith", "a-b_c", "abc"] {
+            assert!(is_ok(username(name)), "should accept {name}");
+        }
+        // Too short/long, or not starting/ending alphanumeric — the label
+        // value rules, since this becomes aether.io/owner.
+        for name in ["ab", &"a".repeat(33), "-alice", "alice-", "_alice", "al ice", "al/ice"] {
+            assert!(!is_ok(username(name)), "should reject {name:?}");
+        }
+    }
+
+    #[test]
+    fn passwords_have_a_floor_and_a_ceiling() {
+        assert!(!is_ok(password("short")));
+        assert!(is_ok(password("longenough")));
+        assert!(!is_ok(password(&"x".repeat(257))));
+    }
+
+    #[test]
+    fn image_refs_reject_whitespace_and_control_characters() {
+        assert!(is_ok(image_ref("nginx:alpine")));
+        assert!(is_ok(image_ref("ctr.int.example.com:8443/aether/aether:v1")));
+        assert!(!is_ok(image_ref("")));
+        assert!(!is_ok(image_ref("nginx alpine")));
+        assert!(!is_ok(image_ref("nginx\nalpine")));
+    }
+
+    #[test]
+    fn accepts_well_formed_node_labels() {
+        for label in [
+            "node-type=cpu",
+            "accelerator=amd",
+            "kubernetes.io/hostname=node-gpu01",
+            "nvidia.com/gpu.product=H100",
+            "empty-value=",
+        ] {
+            assert!(is_ok(node_label(label)), "should accept {label}");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_node_labels() {
+        for label in ["nodetypecpu", "node type=cpu", "=value", "-bad=cpu", "bad-=cpu", &format!("{}=x", "a".repeat(64))] {
+            assert!(!is_ok(node_label(label)), "should reject {label:?}");
+        }
+    }
+
+    #[test]
+    fn bounded_list_caps_both_count_and_size() {
+        let ok = vec!["a".to_string(), "b".to_string()];
+        assert!(is_ok(bounded_list("env", &ok, 5, 10)));
+        assert!(!is_ok(bounded_list("env", &ok, 1, 10)));
+        assert!(!is_ok(bounded_list("env", &["x".repeat(11)], 5, 10)));
+    }
+}

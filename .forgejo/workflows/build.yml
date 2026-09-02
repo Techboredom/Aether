@@ -7,7 +7,39 @@ on:
   workflow_dispatch: {}
 
 jobs:
+  # Gate: nothing gets built or pushed if the tests or lints fail. The runner
+  # executes host-mode and has no Rust toolchain of its own, so this runs in
+  # the same image the Dockerfile builds with rather than installing one.
+  check:
+    runs-on: docker
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Test and lint
+        run: |
+          # Named volumes (not paths in the workspace) keep the cargo registry
+          # and build artifacts across runs, so this doesn't recompile kube +
+          # k8s-openapi from scratch every time. --locked makes a stale
+          # Cargo.lock a loud failure instead of a silent rewrite of a file
+          # that's bind-mounted from the checkout.
+          docker run --rm \
+            -v "$PWD:/src" -w /src \
+            -v aether-ci-cargo:/usr/local/cargo/registry \
+            -v aether-ci-target:/src/target \
+            rust:1-slim-bookworm \
+            bash -eux -c '
+              rustup component add clippy
+              rustup target add wasm32-unknown-unknown
+              cargo test --locked -p backend -p common
+              cargo clippy --locked --all-targets -p backend -p common -- -D warnings
+              cd frontend && cargo clippy --locked --target wasm32-unknown-unknown -- -D warnings
+            '
+
   build:
+    needs: check
     runs-on: docker
     env:
       REGISTRY: ctr.int.example.com:8443
