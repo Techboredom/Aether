@@ -1,5 +1,6 @@
 mod account;
 mod activity_tab;
+mod api;
 mod create_deployment_tab;
 mod deployment_manage;
 mod env_editor;
@@ -9,6 +10,7 @@ mod login;
 mod pod_detail;
 mod pods_tab;
 mod quotas_tab;
+mod result_banner;
 mod templates_tab;
 mod theme;
 mod users_tab;

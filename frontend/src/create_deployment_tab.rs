@@ -1,8 +1,10 @@
 use common::{CreateDeploymentRequest, CreateDeploymentResponse, ImageEntry, MyQuota, TemplateEntry};
-use gloo_net::http::Request;
 use leptos::prelude::*;
 use leptos::tachys::dom::event_target_value;
 use leptos::task::spawn_local;
+
+use crate::api;
+use crate::result_banner::{ErrorBanner};
 
 use crate::env_editor::{EnvVars, EnvVarsEditor};
 use crate::format::{fixed_request_note, quota_summary};
@@ -49,31 +51,21 @@ pub fn CreateDeploymentTab() -> impl IntoView {
     let expose_requests = move || my_quota.get().map(|q| q.expose_resource_requests).unwrap_or(true);
 
     spawn_local(async move {
-        if let Ok(resp) = Request::get("/api/quota/me").send().await
-            && resp.ok()
-                && let Ok(quota) = resp.json::<MyQuota>().await {
-                    my_quota.set(Some(quota));
-                }
+        if let Ok(quota) = api::get_json::<MyQuota>("/api/quota/me").await {
+            my_quota.set(Some(quota));
+        }
     });
 
     spawn_local(async move {
-        match Request::get("/api/images").send().await {
-            Ok(resp) if resp.ok() => match resp.json::<Vec<ImageEntry>>().await {
-                Ok(list) => images.set(list),
-                Err(err) => images_error.set(Some(format!("failed to parse image list: {err}"))),
-            },
-            Ok(resp) => images_error.set(Some(format!("failed to load images: HTTP {}", resp.status()))),
+        match api::get_json::<Vec<ImageEntry>>("/api/images").await {
+            Ok(list) => images.set(list),
             Err(err) => images_error.set(Some(format!("failed to load images: {err}"))),
         }
     });
 
     spawn_local(async move {
-        match Request::get("/api/templates").send().await {
-            Ok(resp) if resp.ok() => match resp.json::<Vec<TemplateEntry>>().await {
-                Ok(list) => templates.set(list),
-                Err(err) => templates_error.set(Some(format!("failed to parse template list: {err}"))),
-            },
-            Ok(resp) => templates_error.set(Some(format!("failed to load templates: HTTP {}", resp.status()))),
+        match api::get_json::<Vec<TemplateEntry>>("/api/templates").await {
+            Ok(list) => templates.set(list),
             Err(err) => templates_error.set(Some(format!("failed to load templates: {err}"))),
         }
     });
@@ -179,8 +171,8 @@ pub fn CreateDeploymentTab() -> impl IntoView {
 
     view! {
         <div class="tab-panel">
-            {move || images_error.get().map(|msg| view! { <div class="error">{msg}</div> })}
-            {move || templates_error.get().map(|msg| view! { <div class="error">{msg}</div> })}
+            <ErrorBanner error=images_error />
+            <ErrorBanner error=templates_error />
 
             <form class="deploy-form" on:submit=on_submit>
                 <label>
@@ -436,16 +428,9 @@ fn slugify(s: &str) -> String {
 }
 
 async fn submit(req: CreateDeploymentRequest) -> LaunchResult {
-    let resp = Request::post("/api/deployments")
-        .json(&req)
-        .map_err(|err| format!("failed to encode request: {err}"))?
-        .send()
-        .await
-        .map_err(|err| format!("request failed: {err}"))?;
-
-    if resp.ok() {
-        let created: CreateDeploymentResponse =
-            resp.json().await.map_err(|err| format!("failed to parse response: {err}"))?;
+    let created: CreateDeploymentResponse =
+        api::post_json("/api/deployments", &req).await.map_err(|err| format!("Failed to create deployment: {err}"))?;
+    {
         let mut msg = format!("Created deployment \"{}\" in namespace \"{}\".", created.name, created.namespace);
         if let (Some(service), Some(port)) = (created.service_name, created.container_port) {
             if created.public_service {
@@ -467,9 +452,5 @@ async fn submit(req: CreateDeploymentRequest) -> LaunchResult {
             msg.push_str(&format!(" Generated credential: {secret} (also shown on the Pods tab)."));
         }
         Ok((msg, created.proxy_path))
-    } else {
-        let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        let message = body.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");
-        Err(format!("Failed to create deployment: {message}"))
     }
 }

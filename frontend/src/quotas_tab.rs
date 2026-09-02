@@ -1,8 +1,10 @@
 use common::{QuotaLimits, QuotaSettings, UserQuotaEntry};
-use gloo_net::http::Request;
 use leptos::prelude::*;
 use leptos::tachys::dom::{event_target_checked, event_target_value};
 use leptos::task::spawn_local;
+
+use crate::api;
+use crate::result_banner::{ErrorBanner, ResultBanner};
 
 use crate::format::{bytes, millicores};
 
@@ -31,20 +33,16 @@ pub fn QuotasTab() -> impl IntoView {
 
     let refresh_settings = move || {
         spawn_local(async move {
-            match Request::get("/api/quota/settings").send().await {
-                Ok(resp) if resp.ok() => match resp.json::<QuotaSettings>().await {
-                    Ok(s) => {
-                        settings_error.set(None);
-                        global_cpu_limit.set(s.limits.cpu_limit.unwrap_or_default());
-                        global_memory_limit.set(s.limits.memory_limit.unwrap_or_default());
-                        global_gpu_limit.set(s.limits.gpu_limit.map(|v| v.to_string()).unwrap_or_default());
-                        expose_resource_requests.set(s.expose_resource_requests);
-                        fixed_cpu_request.set(s.fixed_cpu_request.unwrap_or_default());
-                        fixed_memory_request.set(s.fixed_memory_request.unwrap_or_default());
-                    }
-                    Err(err) => settings_error.set(Some(format!("failed to parse quota settings: {err}"))),
-                },
-                Ok(resp) => settings_error.set(Some(format!("failed to load quota settings: HTTP {}", resp.status()))),
+            match api::get_json::<QuotaSettings>("/api/quota/settings").await {
+                Ok(s) => {
+                    settings_error.set(None);
+                    global_cpu_limit.set(s.limits.cpu_limit.unwrap_or_default());
+                    global_memory_limit.set(s.limits.memory_limit.unwrap_or_default());
+                    global_gpu_limit.set(s.limits.gpu_limit.map(|v| v.to_string()).unwrap_or_default());
+                    expose_resource_requests.set(s.expose_resource_requests);
+                    fixed_cpu_request.set(s.fixed_cpu_request.unwrap_or_default());
+                    fixed_memory_request.set(s.fixed_memory_request.unwrap_or_default());
+                }
                 Err(err) => settings_error.set(Some(format!("failed to load quota settings: {err}"))),
             }
             settings_loading.set(false);
@@ -54,15 +52,11 @@ pub fn QuotasTab() -> impl IntoView {
 
     let refresh_users = move || {
         spawn_local(async move {
-            match Request::get("/api/quota/users").send().await {
-                Ok(resp) if resp.ok() => match resp.json::<Vec<UserQuotaEntry>>().await {
-                    Ok(list) => {
-                        list_error.set(None);
-                        users.set(list);
-                    }
-                    Err(err) => list_error.set(Some(format!("failed to parse user quota list: {err}"))),
-                },
-                Ok(resp) => list_error.set(Some(format!("failed to load user quotas: HTTP {}", resp.status()))),
+            match api::get_json::<Vec<UserQuotaEntry>>("/api/quota/users").await {
+                Ok(list) => {
+                    list_error.set(None);
+                    users.set(list);
+                }
                 Err(err) => list_error.set(Some(format!("failed to load user quotas: {err}"))),
             }
         });
@@ -95,9 +89,8 @@ pub fn QuotasTab() -> impl IntoView {
 
     let clear_override = move |id: i32| {
         spawn_local(async move {
-            match Request::delete(&format!("/api/quota/users/{id}")).send().await {
-                Ok(resp) if resp.ok() => refresh_users(),
-                Ok(resp) => list_error.set(Some(format!("failed to clear override: HTTP {}", resp.status()))),
+            match api::delete(&format!("/api/quota/users/{id}")).await {
+                Ok(()) => refresh_users(),
                 Err(err) => list_error.set(Some(format!("failed to clear override: {err}"))),
             }
         });
@@ -138,7 +131,7 @@ pub fn QuotasTab() -> impl IntoView {
                 <strong>"limits"</strong>
                 ", not requests. Leave a field blank for unlimited."
             </p>
-            {move || settings_error.get().map(|msg| view! { <div class="error">{msg}</div> })}
+            <ErrorBanner error=settings_error />
             <Show when=move || !settings_loading.get()>
                 <form class="deploy-form" on:submit=on_settings_submit>
                     <label>
@@ -205,15 +198,10 @@ pub fn QuotasTab() -> impl IntoView {
                     </div>
                 </form>
             </Show>
-            {move || {
-                settings_result.get().map(|res| match res {
-                    Ok(msg) => view! { <div class="success">{msg}</div> }.into_any(),
-                    Err(msg) => view! { <div class="error">{msg}</div> }.into_any(),
-                })
-            }}
+            <ResultBanner result=settings_result />
 
             <h3 class="section-heading">"Per-user overrides"</h3>
-            {move || list_error.get().map(|msg| view! { <div class="error">{msg}</div> })}
+            <ErrorBanner error=list_error />
             <div class="table-wrap">
                 <table>
                     <thead>
@@ -329,12 +317,7 @@ pub fn QuotasTab() -> impl IntoView {
                         }
                     })
             }}
-            {move || {
-                edit_result.get().map(|res| match res {
-                    Ok(msg) => view! { <div class="success">{msg}</div> }.into_any(),
-                    Err(msg) => view! { <div class="error">{msg}</div> }.into_any(),
-                })
-            }}
+            <ResultBanner result=edit_result />
         </div>
     }
 }
@@ -345,35 +328,12 @@ fn non_empty(s: String) -> Option<String> {
 }
 
 async fn save_settings(req: QuotaSettings) -> Result<String, String> {
-    let resp = Request::put("/api/quota/settings")
-        .json(&req)
-        .map_err(|err| format!("failed to encode request: {err}"))?
-        .send()
-        .await
-        .map_err(|err| format!("request failed: {err}"))?;
-
-    if resp.ok() {
-        Ok("Saved global quota.".to_string())
-    } else {
-        let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        let message = body.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");
-        Err(format!("Failed to save: {message}"))
-    }
+    let _: QuotaSettings = api::put_json("/api/quota/settings", &req).await.map_err(|err| format!("Failed to save: {err}"))?;
+    Ok("Saved global quota.".to_string())
 }
 
 async fn save_override(id: i32, req: QuotaLimits) -> Result<String, String> {
-    let resp = Request::put(&format!("/api/quota/users/{id}"))
-        .json(&req)
-        .map_err(|err| format!("failed to encode request: {err}"))?
-        .send()
-        .await
-        .map_err(|err| format!("request failed: {err}"))?;
-
-    if resp.ok() {
-        Ok("Saved override.".to_string())
-    } else {
-        let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        let message = body.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");
-        Err(format!("Failed to save: {message}"))
-    }
+    let _: QuotaLimits =
+        api::put_json(&format!("/api/quota/users/{id}"), &req).await.map_err(|err| format!("Failed to save: {err}"))?;
+    Ok("Saved override.".to_string())
 }

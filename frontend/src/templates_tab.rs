@@ -1,8 +1,10 @@
 use common::{SaveTemplateRequest, TemplateEntry};
-use gloo_net::http::Request;
 use leptos::prelude::*;
 use leptos::tachys::dom::{event_target_checked, event_target_value};
 use leptos::task::spawn_local;
+
+use crate::api;
+use crate::result_banner::{ErrorBanner, ResultBanner};
 
 use crate::env_editor::{EnvVars, EnvVarsEditor};
 use crate::format;
@@ -35,15 +37,11 @@ pub fn TemplatesTab() -> impl IntoView {
 
     let refresh = move || {
         spawn_local(async move {
-            match Request::get("/api/templates").send().await {
-                Ok(resp) if resp.ok() => match resp.json::<Vec<TemplateEntry>>().await {
-                    Ok(list) => {
-                        list_error.set(None);
-                        templates.set(list);
-                    }
-                    Err(err) => list_error.set(Some(format!("failed to parse template list: {err}"))),
-                },
-                Ok(resp) => list_error.set(Some(format!("failed to load templates: HTTP {}", resp.status()))),
+            match api::get_json::<Vec<TemplateEntry>>("/api/templates").await {
+                Ok(list) => {
+                    list_error.set(None);
+                    templates.set(list);
+                }
                 Err(err) => list_error.set(Some(format!("failed to load templates: {err}"))),
             }
         });
@@ -99,15 +97,13 @@ pub fn TemplatesTab() -> impl IntoView {
             return;
         }
         spawn_local(async move {
-            let outcome = Request::delete(&format!("/api/templates/{id}")).send().await;
-            match outcome {
-                Ok(resp) if resp.ok() => {
+            match api::delete(&format!("/api/templates/{id}")).await {
+                Ok(()) => {
                     if editing_id.get() == Some(id) {
                         clear_form();
                     }
                     refresh();
                 }
-                Ok(resp) => list_error.set(Some(format!("failed to delete template: HTTP {}", resp.status()))),
                 Err(err) => list_error.set(Some(format!("failed to delete template: {err}"))),
             }
         });
@@ -164,7 +160,7 @@ pub fn TemplatesTab() -> impl IntoView {
 
     view! {
         <div class="tab-panel">
-            {move || list_error.get().map(|msg| view! { <div class="error">{msg}</div> })}
+            <ErrorBanner error=list_error />
 
             <div class="table-wrap">
                 <table>
@@ -412,12 +408,7 @@ pub fn TemplatesTab() -> impl IntoView {
                 </div>
             </form>
 
-            {move || {
-                form_result.get().map(|res| match res {
-                    Ok(msg) => view! { <div class="success">{msg}</div> }.into_any(),
-                    Err(msg) => view! { <div class="error">{msg}</div> }.into_any(),
-                })
-            }}
+            <ResultBanner result=form_result />
         </div>
     }
 }
@@ -427,24 +418,10 @@ fn or_dash(s: &str) -> &str {
 }
 
 async fn save(id: Option<i32>, req: SaveTemplateRequest) -> Result<String, String> {
-    let builder = match id {
-        Some(id) => Request::put(&format!("/api/templates/{id}")),
-        None => Request::post("/api/templates"),
-    };
-    let resp = builder
-        .json(&req)
-        .map_err(|err| format!("failed to encode request: {err}"))?
-        .send()
-        .await
-        .map_err(|err| format!("request failed: {err}"))?;
-
-    if resp.ok() {
-        let saved: common::TemplateEntry =
-            resp.json().await.map_err(|err| format!("failed to parse response: {err}"))?;
-        Ok(format!("Saved template \"{}\".", saved.name))
-    } else {
-        let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        let message = body.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");
-        Err(format!("Failed to save template: {message}"))
+    let saved: TemplateEntry = match id {
+        Some(id) => api::put_json(&format!("/api/templates/{id}"), &req).await,
+        None => api::post_json("/api/templates", &req).await,
     }
+    .map_err(|err| format!("Failed to save template: {err}"))?;
+    Ok(format!("Saved template \"{}\".", saved.name))
 }
