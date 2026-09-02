@@ -126,6 +126,11 @@ async fn main() -> anyhow::Result<()> {
     let static_service = ServeDir::new(&args.static_dir).fallback(ServeFile::new(&index_html));
 
     let app = Router::new()
+        // Unauthenticated on purpose: these are for the kubelet, which
+        // presents no session. They must also stay outside /api/, since
+        // everything there requires a login.
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
         .route("/api/login", post(auth::login))
         .route("/api/logout", post(auth::logout))
         .route("/api/me", get(auth::me))
@@ -185,6 +190,41 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
 
     Ok(())
+}
+
+/// Liveness: is this process still serving HTTP at all? Deliberately checks
+/// nothing else — a liveness probe that depended on Postgres would restart a
+/// perfectly healthy app every time the database hiccuped, which is the
+/// opposite of what restarting is for.
+async fn healthz() -> &'static str {
+    "ok"
+}
+
+/// Readiness: should this pod receive traffic? Unlike liveness, this *does*
+/// check Postgres, because an instance that can't reach it can't serve a
+/// single useful request — better to drop out of the Service's endpoints
+/// until it can.
+async fn readyz(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> (axum::http::StatusCode, &'static str) {
+    // Bounded explicitly: with Postgres unreachable the pool blocks waiting
+    // for a connection until its own (much longer) acquire timeout, so the
+    // probe would hang rather than answer. A probe that times out is failed
+    // either way, but answering promptly keeps the reason in our logs
+    // instead of only in the kubelet's.
+    const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+    let unavailable = (axum::http::StatusCode::SERVICE_UNAVAILABLE, "database not reachable");
+    match tokio::time::timeout(READY_TIMEOUT, sqlx::query("SELECT 1").execute(&state.pg)).await {
+        Ok(Ok(_)) => (axum::http::StatusCode::OK, "ok"),
+        Ok(Err(err)) => {
+            tracing::warn!(error = %err, "readiness check failed");
+            unavailable
+        }
+        Err(_) => {
+            tracing::warn!("readiness check timed out waiting for the database");
+            unavailable
+        }
+    }
 }
 
 /// Deletes credentials that have already expired. Nothing reads them once
