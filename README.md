@@ -214,6 +214,8 @@ additionally require the `admin` role (403 otherwise).
 - `PUT /api/quota/users/{id}` *(admin)* — sets (or replaces) a user's quota override, same `{cpu_limit, memory_limit, gpu_limit}` shape as the global settings' limits. `DELETE /api/quota/users/{id}` *(admin)* clears it, reverting that user to the global default.
 - `GET /proxy-auth?deployment=&next=` — the app-origin half of the proxy handshake. Verifies the caller's session and that they may open `deployment`, then redirects to that deployment's own origin carrying a single-use token. 403 if you don't own it; redirects to the SPA if you aren't logged in (it's a link people follow, not an API call). Only meaningful when `PROXY_BASE_DOMAIN` is set.
 - `ANY <name>.<PROXY_BASE_DOMAIN>/*` — everything on a per-deployment proxy origin is forwarded to that deployment's pod, including paths like `/api/...` that would otherwise be Aether's own. `GET /__aether/auth` on that origin is the one exception: it redeems the token above and sets the origin's own `aether_proxy` cookie.
+- `GET /healthz` — liveness, no auth. Always 200 while the process is serving; deliberately checks nothing else, since a liveness probe that depended on Postgres would restart a healthy app whenever the database hiccuped.
+- `GET /readyz` — readiness, no auth. 200 when Postgres answers, 503 otherwise (bounded at 2s, because an unreachable database makes the pool block rather than fail). Unlike liveness, this *should* fail — an instance that can't reach Postgres can't serve a useful request and should drop out of the Service's endpoints.
 - `GET /*` — serves the built frontend (`index.html`, JS, WASM, CSS)
 
 ## Image and template catalogs (Postgres)
