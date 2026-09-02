@@ -822,6 +822,27 @@ in-cluster client would.
   just metadata anyone with direct `kubectl` access to the namespace can see
   or edit. It restricts what Aether's UI/API surface shows a `user` account,
   not what's actually running in the cluster.
+- **The reverse proxy strips Aether's own credentials before forwarding.** A
+  proxied pod runs code Aether doesn't control — JupyterLab and RStudio run
+  arbitrary user code by design, and `enable_proxy` can be set on any image —
+  so `backend/src/proxy.rs::forwarded_headers` removes the caller's
+  `aether_session` cookie and their `Authorization` header on the way in, and
+  drops any upstream `Set-Cookie` that would overwrite `aether_session` on the
+  way back out (which would otherwise let a hostile pod pin the caller's
+  browser to a session of its choosing). Every *other* cookie is forwarded
+  untouched, because proxied apps set and depend on their own (RStudio's
+  session, JupyterLab's XSRF token). Unit-tested in that module.
+- **Proxied apps are still served same-origin with Aether itself, which is a
+  known open hole** — `/proxy/<name>/` shares an origin with the SPA and
+  `/api/*`, so JavaScript served by a proxied pod can call Aether's own API
+  with the browsing user's cookie attached automatically. `HttpOnly` doesn't
+  help (the JS never reads the cookie, the browser just sends it), and
+  `SameSite=Lax` doesn't either (it's the same site). Since an admin can open
+  *anyone's* proxied app, a user can escalate to admin by getting one opened.
+  Stripping the credentials above prevents outright token theft but does not
+  close this; the fix in progress is to serve each deployment on its own
+  origin (`<name>.proxy.<base-domain>`), which is what the `PROXY_BASE_DOMAIN`
+  work is for. Until that lands, only open proxied apps you trust.
 - The container runs as a non-root user with a read-only root filesystem and
   all Linux capabilities dropped.
 - `CorsLayer::permissive()` is enabled on the backend to make local `trunk
