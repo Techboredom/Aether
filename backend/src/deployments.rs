@@ -90,6 +90,9 @@ pub async fn create_deployment(
         (Some(accel_type), Some(count)) if !accel_type.trim().is_empty() && count > 0 => count * replicas,
         _ => 0,
     };
+    // Held until the Deployment is actually created, so a concurrent launch
+    // can't slip past the same quota check — see AppState::lock_launches.
+    let launch_guard = state.lock_launches().await;
     quota::check_quota(&state, &user, None, additional_cpu, additional_memory, additional_gpu).await?;
 
     // When requests aren't exposed to the user, an admin-configured fixed
@@ -205,6 +208,9 @@ pub async fn create_deployment(
 
     let deployments: Api<Deployment> = Api::namespaced(state.client.clone(), &state.namespace);
     let created = deployments.create(&PostParams::default(), &deployment).await?;
+    // The new footprint is now visible to the next quota check; everything
+    // below is bookkeeping that doesn't affect it.
+    drop(launch_guard);
     let name = created.metadata.name.unwrap_or(req.name);
 
     // No ingress controller in the cluster yet, so expose the app directly via
@@ -503,6 +509,7 @@ pub async fn update_deployment(
     let additional_cpu = req.cpu_limit.as_deref().and_then(|v| parse_cpu_millicores(&Quantity(v.to_string()))).unwrap_or(0) * replicas;
     let additional_memory = req.memory_limit.as_deref().and_then(|v| parse_memory_bytes(&Quantity(v.to_string()))).unwrap_or(0) * replicas;
     let additional_gpu = per_replica_gpu * replicas;
+    let launch_guard = state.lock_launches().await;
     quota::check_quota(&state, &user, Some(&name), additional_cpu, additional_memory, additional_gpu).await?;
 
     // Never regenerate an existing secret on edit - that would silently
@@ -577,6 +584,7 @@ pub async fn update_deployment(
     }
 
     let updated = deployments.replace(&name, &PostParams::default(), &deployment).await?;
+    drop(launch_guard);
     let secret_key = secret.map(|(key, _)| key);
     let out_container = updated.spec.as_ref().and_then(|s| s.template.spec.as_ref()).and_then(|s| s.containers.first());
     let out_env: Vec<(String, String)> = out_container
