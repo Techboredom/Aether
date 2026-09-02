@@ -156,6 +156,8 @@ All flags can also be set as environment variables:
 | `--static-dir` / `STATIC_DIR` | `frontend/dist` | Directory of the built frontend to serve |
 | `--database-url` / `DATABASE_URL` | *(required)* | Postgres connection string for the image/template catalogs and accounts |
 | `--admin-bootstrap-password` / `ADMIN_BOOTSTRAP_PASSWORD` | *(none)* | Creates the initial `admin` account on first run only; ignored once any user exists |
+| `--app-origin` / `APP_ORIGIN` | *(none)* | Public origin this app is served from, e.g. `https://aether.example.com`. Must be set together with `--proxy-base-domain` |
+| `--proxy-base-domain` / `PROXY_BASE_DOMAIN` | *(none)* | Base domain for per-deployment proxy origins, e.g. `proxy.aether.example.com`. Needs wildcard DNS + TLS for `*.<domain>`. **Leaving it unset is only appropriate for local development** — see "Per-deployment proxy origins" below |
 
 ### Endpoints
 
@@ -189,6 +191,8 @@ additionally require the `admin` role (403 otherwise).
 - `GET /api/quota/settings` / `PUT /api/quota/settings` *(admin for PUT; GET requires only login)* — the global default quota: `{cpu_limit, memory_limit, gpu_limit, expose_resource_requests, fixed_cpu_request, fixed_memory_request}`. The limit/request fields are quantity strings (e.g. `"4"`/`"16Gi"`) or a plain integer (`gpu_limit`) — `null`/omitted means unlimited for a limit, or "leave unset" for a fixed request. `fixed_cpu_request`/`fixed_memory_request` only take effect while `expose_resource_requests` is `false` (see "User quotas" below).
 - `GET /api/quota/users` *(admin)* — every account's `{user_id, username, quota_override, used_cpu_millicores, used_memory_bytes, used_gpu_count}` — `quota_override` is `null` if that user has no override and is bound by the global default. Backs the Quotas admin tab's table.
 - `PUT /api/quota/users/{id}` *(admin)* — sets (or replaces) a user's quota override, same `{cpu_limit, memory_limit, gpu_limit}` shape as the global settings' limits. `DELETE /api/quota/users/{id}` *(admin)* clears it, reverting that user to the global default.
+- `GET /proxy-auth?deployment=&next=` — the app-origin half of the proxy handshake. Verifies the caller's session and that they may open `deployment`, then redirects to that deployment's own origin carrying a single-use token. 403 if you don't own it; redirects to the SPA if you aren't logged in (it's a link people follow, not an API call). Only meaningful when `PROXY_BASE_DOMAIN` is set.
+- `ANY <name>.<PROXY_BASE_DOMAIN>/*` — everything on a per-deployment proxy origin is forwarded to that deployment's pod, including paths like `/api/...` that would otherwise be Aether's own. `GET /__aether/auth` on that origin is the one exception: it redeems the token above and sets the origin's own `aether_proxy` cookie.
 - `GET /*` — serves the built frontend (`index.html`, JS, WASM, CSS)
 
 ## Image and template catalogs (Postgres)
@@ -464,6 +468,61 @@ Scaling or editing an existing deployment excludes *that deployment's own*
 current usage from the baseline before adding its proposed new footprint,
 so raising its own replica count or limits is judged only against what it
 would become, not double-counted against what it already is.
+
+## Per-deployment proxy origins
+
+A proxied app runs code Aether doesn't control — JupyterLab and RStudio run
+arbitrary user code by design, and `enable_proxy` can be set on any image.
+Serving those apps from a path on Aether's own origin (`/proxy/<name>/`, the
+original design) means their JavaScript is *same-origin* with the SPA and
+`/api/*`, so it can call Aether's API with the browsing user's session cookie
+attached automatically. `HttpOnly` is no defence (the JS never reads the
+cookie — the browser just sends it) and neither is `SameSite=Lax` (same site).
+Because an admin can open anyone's proxied app, that let a `user` account
+escalate to admin simply by getting theirs opened. This is the same reason
+JupyterHub ships per-user subdomains.
+
+Setting `PROXY_BASE_DOMAIN` (plus `APP_ORIGIN`) gives every deployment its own
+origin — `<name>.proxy.aether.example` — so the browser treats it as a
+different site entirely. Requests to a proxy origin are dispatched by `Host`
+in a middleware sitting *outside* the app's router
+(`proxy::dispatch_by_host`), so they never reach `/api/*` or the SPA at all;
+everything on that origin, including a path like `/api/pods`, is forwarded to
+the pod. The old `/proxy/<name>/` path stops serving content and just
+redirects to the new origin, so the hole closes rather than lingering beside
+the fix. Host matching accepts exactly one label in front of the base domain,
+matching what a wildcard TLS cert covers.
+
+Because Aether's session cookie is host-only, it is never sent to a proxy
+origin — which is the point, but means that origin needs its own way to know
+who you are. Hence a small handshake, mirroring OAuth's shape:
+
+1. A request to `<name>.proxy…` with no proxy session redirects to
+   `/proxy-auth` on the **app** origin — the only host that receives the
+   session cookie.
+2. There, Aether verifies the session and that the caller may open this
+   deployment (owner, or an admin), then mints a single-use token with a 30
+   second lifetime and redirects back to the deployment's origin.
+3. That origin redeems the token (deleted as it's read, so a copy left in
+   history or a `Referer` is already spent), checks it was minted for *this*
+   deployment, and sets its own `aether_proxy` cookie — host-only, so it
+   belongs to that one subdomain and nothing else under the base domain.
+4. Later requests carry that cookie. The user is re-resolved from it on every
+   request rather than trusted from the cookie alone, so deleting an account
+   (or replacing a deployment with a same-named one owned by someone else)
+   takes effect immediately.
+
+The `aether_proxy` cookie authorizes exactly one deployment and nothing else
+in Aether, so a pod capturing its own is no more powerful than it already was.
+Both it and `aether_session` are stripped from anything forwarded upstream.
+
+Note this also makes the **admin bypass safe again**: an admin can open a
+user's app for support, because that app is now cross-origin from `/api`.
+
+**Deploying it** needs a wildcard DNS record for `*.<PROXY_BASE_DOMAIN>` and a
+TLS cert covering both that wildcard and the app's own hostname, pointed at
+whatever fronts Aether. `APP_ORIGIN`'s scheme decides whether the
+`aether_proxy` cookie is marked `Secure`, so serve both over HTTPS.
 
 ## Per-user node placement
 
@@ -832,17 +891,17 @@ in-cluster client would.
   browser to a session of its choosing). Every *other* cookie is forwarded
   untouched, because proxied apps set and depend on their own (RStudio's
   session, JupyterLab's XSRF token). Unit-tested in that module.
-- **Proxied apps are still served same-origin with Aether itself, which is a
-  known open hole** — `/proxy/<name>/` shares an origin with the SPA and
-  `/api/*`, so JavaScript served by a proxied pod can call Aether's own API
-  with the browsing user's cookie attached automatically. `HttpOnly` doesn't
-  help (the JS never reads the cookie, the browser just sends it), and
-  `SameSite=Lax` doesn't either (it's the same site). Since an admin can open
-  *anyone's* proxied app, a user can escalate to admin by getting one opened.
-  Stripping the credentials above prevents outright token theft but does not
-  close this; the fix in progress is to serve each deployment on its own
-  origin (`<name>.proxy.<base-domain>`), which is what the `PROXY_BASE_DOMAIN`
-  work is for. Until that lands, only open proxied apps you trust.
+- **Each proxied deployment is served from its own origin** when
+  `PROXY_BASE_DOMAIN` is set — see "Per-deployment proxy origins" below. This
+  is what stops a proxied app's JavaScript from calling Aether's own API as
+  whoever is browsing it. **With it unset, that hole is open**: `/proxy/<name>/`
+  then shares an origin with the SPA and `/api/*`, so a pod's JS can call the
+  API with the browsing user's cookie attached automatically (`HttpOnly`
+  doesn't help — the JS never reads the cookie, the browser just sends it; nor
+  does `SameSite=Lax` — it's the same site), and since an admin can open
+  anyone's proxied app, a user could escalate to admin by getting one opened.
+  Configure it for any shared deployment; leaving it unset is a local-dev
+  convenience only, and the backend logs a warning at startup when it is.
 - The container runs as a non-root user with a read-only root filesystem and
   all Linux capabilities dropped.
 - `CorsLayer::permissive()` is enabled on the backend to make local `trunk

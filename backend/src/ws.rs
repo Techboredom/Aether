@@ -10,7 +10,7 @@ use crate::visibility;
 
 pub async fn list_pods(user: CurrentUser, State(state): State<AppState>) -> Json<Vec<common::PodInfo>> {
     let pods = state.snapshot().await;
-    Json(visibility::visible_to(pods, &user, &state.pg).await)
+    Json(visibility::visible_to(pods, &user, &state).await)
 }
 
 pub async fn ws_handler(user: CurrentUser, ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
@@ -21,7 +21,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, user: CurrentUser
     // Subscribe before reading the snapshot so no update can be missed in between;
     // any event replayed for a pod already in the snapshot is a harmless no-op overwrite.
     let mut rx = state.subscribe();
-    let snapshot = visibility::visible_to(state.snapshot().await, &user, &state.pg).await;
+    let snapshot = visibility::visible_to(state.snapshot().await, &user, &state).await;
 
     if send_event(&mut socket, &PodEvent::Snapshot { pods: snapshot }).await.is_err() {
         return;
@@ -35,7 +35,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, user: CurrentUser
                         if !visibility::can_see(&pod, &user) {
                             continue;
                         }
-                        visibility::attach_credential(&mut pod, &state.pg).await;
+                        visibility::attach_credential(&mut pod, &state).await;
                         if send_event(&mut socket, &PodEvent::Upsert { pod }).await.is_err() {
                             break;
                         }
@@ -51,7 +51,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, user: CurrentUser
                     Ok(PodEvent::Snapshot { .. }) => {} // never actually broadcast; see state.rs
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         // Client fell behind; resync it with a fresh full snapshot.
-                        let snapshot = visibility::visible_to(state.snapshot().await, &user, &state.pg).await;
+                        let snapshot = visibility::visible_to(state.snapshot().await, &user, &state).await;
                         if send_event(&mut socket, &PodEvent::Snapshot { pods: snapshot }).await.is_err() {
                             break;
                         }

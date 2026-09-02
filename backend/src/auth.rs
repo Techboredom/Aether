@@ -82,6 +82,21 @@ impl FromRequestParts<AppState> for CurrentUser {
     }
 }
 
+/// Loads a user directly by id, for the paths that establish identity from
+/// something other than the `aether_session` cookie — specifically a proxy
+/// origin's own session (see `proxy.rs`), which lives on a different host and
+/// therefore never receives that cookie.
+pub async fn user_by_id(pg: &sqlx::PgPool, id: i32) -> Result<Option<CurrentUser>, ApiError> {
+    let row: Option<SessionUserRow> =
+        sqlx::query_as("SELECT id, username, role, node_label FROM users WHERE id = $1").bind(id).fetch_optional(pg).await?;
+    Ok(row.map(|row| CurrentUser {
+        id: row.id,
+        username: row.username,
+        role: if row.role == "admin" { Role::Admin } else { Role::User },
+        node_label: row.node_label,
+    }))
+}
+
 /// Same as `CurrentUser`, but rejects non-admins with 403. Use this as the
 /// parameter type for admin-only endpoints (Templates writes, Users management).
 pub struct AdminUser(pub CurrentUser);

@@ -53,6 +53,25 @@ struct Args {
     /// `users` table is empty. Ignored once any user exists.
     #[arg(long, env = "ADMIN_BOOTSTRAP_PASSWORD")]
     admin_bootstrap_password: Option<String>,
+
+    /// Public origin this app is served from, e.g.
+    /// "https://aether.example.com". Must be set together with
+    /// `--proxy-base-domain`.
+    #[arg(long, env = "APP_ORIGIN", requires = "proxy_base_domain")]
+    app_origin: Option<String>,
+
+    /// Base domain for per-deployment proxy origins, e.g.
+    /// "proxy.aether.example.com" — a deployment named `foo` is then
+    /// served at `foo.proxy.aether.example.com`, on its own origin
+    /// rather than on a path under this app's. Needs a wildcard DNS record
+    /// (and TLS cert) covering `*.<this domain>`.
+    ///
+    /// Leaving this unset keeps the legacy same-origin `/proxy/<name>/`
+    /// behavior, which lets a proxied app's JavaScript call this app's own
+    /// API as whoever is browsing it — acceptable for local development,
+    /// not for a shared deployment.
+    #[arg(long, env = "PROXY_BASE_DOMAIN", requires = "app_origin")]
+    proxy_base_domain: Option<String>,
 }
 
 #[tokio::main]
@@ -70,7 +89,28 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!().run(&pg).await?;
     bootstrap_admin(&pg, args.admin_bootstrap_password.as_deref()).await?;
 
-    let state = AppState::new(args.namespace.clone(), client.clone(), pg);
+    // `requires` on both flags means clap rejects setting one without the
+    // other, so this zip either yields both or neither.
+    let proxy_origin = args.app_origin.as_ref().zip(args.proxy_base_domain.as_ref()).map(|(app_origin, base_domain)| {
+        state::ProxyOrigin {
+            app_origin: app_origin.trim_end_matches('/').to_string(),
+            base_domain: base_domain.trim_start_matches('.').to_string(),
+        }
+    });
+    match &proxy_origin {
+        Some(origin) => tracing::info!(
+            base_domain = %origin.base_domain,
+            app_origin = %origin.app_origin,
+            "serving proxied deployments on per-deployment origins"
+        ),
+        None => tracing::warn!(
+            "PROXY_BASE_DOMAIN is not set — proxied apps are served same-origin at /proxy/<name>/, \
+             where their own JavaScript can call this app's API as whoever is browsing them; \
+             intended for local development only"
+        ),
+    }
+
+    let state = AppState::new(args.namespace.clone(), client.clone(), pg, proxy_origin);
     tokio::spawn(watch::run(state.clone(), client));
 
     let index_html = format!("{}/index.html", args.static_dir);
@@ -112,10 +152,17 @@ async fn main() -> anyhow::Result<()> {
         .route("/proxy/{deployment_name}", any(proxy::handler_root))
         .route("/proxy/{deployment_name}/", any(proxy::handler_root))
         .route("/proxy/{deployment_name}/{*rest}", any(proxy::handler))
+        // Entry point for a proxy origin that has no session of its own yet:
+        // it lands here, on the app origin, where the caller's session cookie
+        // actually exists. See proxy::start_proxy_auth.
+        .route("/proxy-auth", get(proxy::start_proxy_auth))
         .fallback_service(static_service)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
-        .with_state(state);
+        .with_state(state.clone())
+        // Outermost, so a request to a deployment's own origin is served as
+        // that deployment and never reaches the routes above at all.
+        .layer(axum::middleware::from_fn_with_state(state, proxy::dispatch_by_host));
 
     let addr: SocketAddr = args.bind_addr.parse()?;
     tracing::info!(%addr, namespace = %args.namespace, "starting server");

@@ -21,10 +21,6 @@ use crate::resources::{parse_count, parse_cpu_millicores, parse_memory_bytes, OW
 use crate::state::AppState;
 use crate::validate;
 
-/// Errors if `user` isn't allowed to manage `deployment` — an admin always
-/// is; anyone else only for a deployment carrying their own `OWNER_LABEL`.
-/// A deployment with no owner label at all (predates Aether, or wasn't
-/// launched through it) can only be managed by an admin.
 /// Parses a user's admin-set "key=value" node label (validated at
 /// write-time by `validate::node_label`, so this only ever sees a
 /// well-formed value) into the single-entry map `PodSpec::node_selector`
@@ -34,6 +30,10 @@ fn node_selector_for(user: &CurrentUser) -> Option<BTreeMap<String, String>> {
     Some(BTreeMap::from([(key.to_string(), value.to_string())]))
 }
 
+/// Errors if `user` isn't allowed to manage `deployment` — an admin always
+/// is; anyone else only for a deployment carrying their own `OWNER_LABEL`.
+/// A deployment with no owner label at all (predates Aether, or wasn't
+/// launched through it) can only be managed by an admin.
 fn check_owner(deployment: &Deployment, user: &CurrentUser) -> Result<(), ApiError> {
     if user.role == Role::Admin {
         return Ok(());
@@ -311,7 +311,7 @@ pub async fn create_deployment(
     .execute(&state.pg)
     .await?;
 
-    let proxy_path = req.enable_proxy.then(|| format!("/proxy/{name}/"));
+    let proxy_path = req.enable_proxy.then(|| state.proxy_url(&name));
 
     Ok(Json(CreateDeploymentResponse {
         name,
