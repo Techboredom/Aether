@@ -4,11 +4,12 @@ use common::{PodCredential, PodInfo, Role};
 use sqlx::PgPool;
 
 use crate::auth::CurrentUser;
+use crate::state::AppState;
 
 /// Filters `pods` down to what `user` is allowed to see — everything, for an
 /// admin; only pods they launched themselves, for everyone else — and
 /// attaches each visible pod's stored credential (if its template generated one).
-pub async fn visible_to(pods: Vec<PodInfo>, user: &CurrentUser, pg: &PgPool) -> Vec<PodInfo> {
+pub async fn visible_to(pods: Vec<PodInfo>, user: &CurrentUser, state: &AppState) -> Vec<PodInfo> {
     let mut visible: Vec<PodInfo> = if user.role == Role::Admin {
         pods
     } else {
@@ -20,7 +21,7 @@ pub async fn visible_to(pods: Vec<PodInfo>, user: &CurrentUser, pg: &PgPool) -> 
         return visible;
     }
 
-    let secrets = match load_secrets(pg, &deployment_names).await {
+    let secrets = match load_secrets(&state.pg, &deployment_names).await {
         Ok(secrets) => secrets,
         Err(err) => {
             tracing::warn!(error = %err, "failed to load deployment secrets");
@@ -31,7 +32,7 @@ pub async fn visible_to(pods: Vec<PodInfo>, user: &CurrentUser, pg: &PgPool) -> 
         if let Some(name) = &pod.deployment_name
             && let Some(stored) = secrets.get(name) {
                 pod.credential = stored.credential.clone();
-                pod.proxy_path = stored.proxy_enabled.then(|| format!("/proxy/{name}/"));
+                pod.proxy_path = stored.proxy_enabled.then(|| state.proxy_url(name));
             }
     }
     visible
@@ -46,17 +47,17 @@ pub fn can_see(pod: &PodInfo, user: &CurrentUser) -> bool {
 /// Attaches `pod`'s stored credential (and proxy path, if proxy-enabled) in
 /// place. Used for single live Upsert events, where a full batch lookup
 /// would be overkill.
-pub async fn attach_credential(pod: &mut PodInfo, pg: &PgPool) {
+pub async fn attach_credential(pod: &mut PodInfo, state: &AppState) {
     let Some(name) = &pod.deployment_name else { return };
     if let Ok(Some((env_key, value, proxy_enabled))) = sqlx::query_as::<_, (Option<String>, Option<String>, bool)>(
         "SELECT env_key, secret_value, proxy_enabled FROM deployment_secrets WHERE deployment_name = $1",
     )
     .bind(name)
-    .fetch_optional(pg)
+    .fetch_optional(&state.pg)
     .await
     {
         pod.credential = credential_from(env_key, value);
-        pod.proxy_path = proxy_enabled.then(|| format!("/proxy/{name}/"));
+        pod.proxy_path = proxy_enabled.then(|| state.proxy_url(name));
     }
 }
 
