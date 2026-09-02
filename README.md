@@ -437,14 +437,29 @@ regardless of what Aether enforces.
 
 Quota is checked against resource **limits**, not requests — interactive
 workloads are bursty, so it's peak usage that risks starving other users,
-not steady-state reservation. Usage itself is summed live from the pod
-watcher's own in-memory cache (`PodInfo::cpu_limit_millicores`/
-`memory_limit_bytes`/`accelerators`, already computed for the Pods tab) —
-no separate accounting table, and no new Kubernetes RBAC verbs were needed
-to compute it. GPU quota is a single aggregate count regardless of
-accelerator vendor/type (`nvidia.com/gpu`, `amd.com/gpu`, ... all count
-toward the same limit) — simplest, and this cluster currently only has
-AMD GPUs anyway.
+not steady-state reservation. GPU quota is a single aggregate count
+regardless of accelerator vendor/type (`nvidia.com/gpu`, `amd.com/gpu`, ...
+all count toward the same limit) — simplest, and this cluster currently
+only has AMD GPUs anyway.
+
+Usage is summed from **Deployment specs** (`replicas × container limits`,
+grouped by the `aether.io/owner` label), not from observed pods. Reading
+pods is tempting, since the watcher already caches them, but it's wrong in
+both directions: pods don't exist until a second or two after a Deployment
+is created, so a burst of launches all measure a stale, empty cluster and
+every one of them passes a quota they collectively blow through; and during
+a rolling update the old and new pods coexist, so a legitimate launch gets
+rejected against a footprint twice the real one. A Deployment's spec is
+authoritative the moment it's written, and is precisely what the user is
+asking to reserve. This is why the app's Role needs `list` on
+`apps/deployments`.
+
+Reading usage and then writing is still two steps, so the two are serialized
+behind a single lock (`AppState::lock_launches`), held across the Kubernetes
+write — otherwise two simultaneous launches would both read the pre-write
+total and both be allowed. Launches are infrequent and the lock is held only
+for the API call, so one global lock is plenty and much easier to reason
+about than a per-user map.
 
 A separate global toggle, **`expose_resource_requests`**, controls whether
 the Launch tab and the Pods tab's manage panel show CPU/memory *request*
@@ -849,14 +864,15 @@ attributes client-side for early feedback:
 
 **Kubernetes RBAC** is minimal and namespaced (no `ClusterRole`): read-only
 (`get`/`list`/`watch`) on `pods`, `get` on `pods/log`, `get`/`list` on
-`events`, plus `create`/`get` on `apps/deployments` and on `services` —
-nothing else. The app can create Deployments and Services but can't delete,
-patch, list, or watch existing ones, and has no access to Secrets,
-ConfigMaps, RBAC objects, etc. The reverse proxy doesn't need any RBAC
-beyond `get` on `services` (already listed above) — it never talks to the
-Kubernetes API to reach the app itself, just to look up a Service's
-ClusterIP, then connects to that IP directly over plain TCP like any other
-in-cluster client would.
+`events`, `create`/`get`/`list`/`update`/`delete` on `apps/deployments`, and
+`create`/`get`/`delete` on `services` — nothing else. It has no access to
+Secrets, ConfigMaps, RBAC objects, or anything outside its own namespace.
+The Deployment verbs beyond `create`/`get` are what the Pods tab's manage
+panel needs (`update` to scale/edit, `delete` to remove) plus `list` for
+quota accounting (see "User quotas"). The reverse proxy needs no RBAC beyond
+`get` on `services` (already listed) — it never asks the Kubernetes API to
+reach an app, just to look up a Service's ClusterIP, then connects to that
+IP directly over plain TCP like any other in-cluster client would.
 
 **Other:**
 

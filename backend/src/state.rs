@@ -4,7 +4,7 @@ use std::sync::Arc;
 use common::{PodEvent, PodInfo};
 use kube::Client;
 use sqlx::PgPool;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, Mutex, MutexGuard, RwLock};
 
 /// Serves each proxied deployment from its own origin
 /// (`<name>.<base_domain>`) rather than from a path on Aether's own origin.
@@ -66,6 +66,7 @@ pub struct AppState {
     pub pg: PgPool,
     /// `None` = legacy same-origin `/proxy/<name>/` mode; see [`ProxyOrigin`].
     pub proxy_origin: Option<ProxyOrigin>,
+    launches: Arc<Mutex<()>>,
     pods: Arc<RwLock<HashMap<String, PodInfo>>>,
     events: broadcast::Sender<PodEvent>,
 }
@@ -78,9 +79,24 @@ impl AppState {
             client,
             pg,
             proxy_origin,
+            launches: Arc::new(Mutex::new(())),
             pods: Arc::new(RwLock::new(HashMap::new())),
             events,
         }
+    }
+
+    /// Serializes quota-checked writes (launch, scale, edit).
+    ///
+    /// Quota is enforced by reading current usage and then writing — two
+    /// requests interleaving between those steps would both see the
+    /// pre-write total and both be allowed, letting a user step over their
+    /// quota just by launching twice at once. Held across the Kubernetes
+    /// write so the next caller reads a cluster that already includes it.
+    /// Global rather than per-user: these writes are infrequent and
+    /// short-lived, and one lock is far easier to reason about than a map of
+    /// them.
+    pub async fn lock_launches(&self) -> MutexGuard<'_, ()> {
+        self.launches.lock().await
     }
 
     /// The URL that opens `deployment` — an absolute URL on its own origin

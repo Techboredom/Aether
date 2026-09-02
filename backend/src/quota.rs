@@ -2,13 +2,15 @@ use std::collections::HashMap;
 
 use axum::extract::{Path, State};
 use axum::Json;
-use common::{MyQuota, PodInfo, QuotaLimits, QuotaSettings, Role, UserQuotaEntry};
+use common::{MyQuota, QuotaLimits, QuotaSettings, Role, UserQuotaEntry};
+use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+use kube::api::{Api, ListParams};
 use sqlx::PgPool;
 
 use crate::auth::{AdminUser, CurrentUser};
 use crate::error::ApiError;
-use crate::resources::{parse_cpu_millicores, parse_memory_bytes};
+use crate::resources::{parse_count, parse_cpu_millicores, parse_memory_bytes, OWNER_LABEL};
 use crate::state::AppState;
 use crate::validate;
 
@@ -61,23 +63,70 @@ async fn effective_quota(state: &AppState, user: &CurrentUser) -> Result<(QuotaL
     }
 }
 
-/// Sums limit-based CPU/memory/GPU usage across `pods` owned by `username`,
-/// optionally excluding one deployment's pods — used when editing an
-/// existing deployment, so its current footprint isn't counted twice
-/// against the proposed new one.
-fn usage_from_pods(pods: &[PodInfo], username: &str, exclude_deployment: Option<&str>) -> (i64, i64, i64) {
-    let mut cpu = 0i64;
-    let mut mem = 0i64;
-    let mut gpu = 0i64;
-    for pod in pods.iter().filter(|p| p.owner.as_deref() == Some(username)) {
-        if exclude_deployment.is_some() && pod.deployment_name.as_deref() == exclude_deployment {
+/// One account's total reserved footprint, in the same limit-based terms the
+/// quota itself is expressed in.
+#[derive(Default, Clone, Copy, PartialEq, Debug)]
+pub struct Usage {
+    pub cpu_millicores: i64,
+    pub memory_bytes: i64,
+    pub gpu_count: i64,
+}
+
+/// Sums each owner's footprint from **Deployment specs** — desired state —
+/// rather than from running pods.
+///
+/// Counting observed pods is tempting (the watcher already has them) but is
+/// wrong in both directions. Pods don't exist for a second or two after a
+/// Deployment is created, so a burst of launches all measure a stale, empty
+/// cluster and every one of them passes a quota they collectively blow
+/// through. And during a rolling update the old and new pods coexist, so a
+/// legitimate launch can be rejected against a footprint twice the real one.
+/// A Deployment's spec is authoritative the moment it's written, and is
+/// exactly what the user is asking to reserve.
+///
+/// `exclude_deployment` drops one deployment from the totals, so editing an
+/// existing one is judged against what it *would* become rather than being
+/// double-counted against what it already is.
+fn usage_by_owner(deployments: &[Deployment], exclude_deployment: Option<&str>) -> HashMap<String, Usage> {
+    let mut by_owner: HashMap<String, Usage> = HashMap::new();
+    for deployment in deployments {
+        let name = deployment.metadata.name.as_deref().unwrap_or_default();
+        if exclude_deployment == Some(name) {
             continue;
         }
-        cpu += pod.cpu_limit_millicores.unwrap_or(0);
-        mem += pod.memory_limit_bytes.unwrap_or(0);
-        gpu += pod.accelerators.values().sum::<i64>();
+        let Some(owner) = deployment.metadata.labels.as_ref().and_then(|l| l.get(OWNER_LABEL)) else {
+            // Not launched through Aether, so not attributable to an account.
+            continue;
+        };
+        let replicas = i64::from(deployment.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1));
+        let containers =
+            deployment.spec.as_ref().and_then(|s| s.template.spec.as_ref()).map(|s| s.containers.as_slice()).unwrap_or(&[]);
+
+        let entry = by_owner.entry(owner.clone()).or_default();
+        for limits in containers.iter().filter_map(|c| c.resources.as_ref()).filter_map(|r| r.limits.as_ref()) {
+            for (key, quantity) in limits {
+                match key.as_str() {
+                    "cpu" => entry.cpu_millicores += parse_cpu_millicores(quantity).unwrap_or(0) * replicas,
+                    "memory" => entry.memory_bytes += parse_memory_bytes(quantity).unwrap_or(0) * replicas,
+                    // Anything else with a limit is an extended resource —
+                    // i.e. an accelerator, whatever the vendor prefix.
+                    _ => entry.gpu_count += parse_count(quantity).unwrap_or(0) * replicas,
+                }
+            }
+        }
     }
-    (cpu, mem, gpu)
+    by_owner
+}
+
+/// Every Deployment in the watched namespace, for quota accounting.
+async fn list_deployments(state: &AppState) -> Result<Vec<Deployment>, ApiError> {
+    let api: Api<Deployment> = Api::namespaced(state.client.clone(), &state.namespace);
+    Ok(api.list(&ListParams::default()).await?.items)
+}
+
+async fn usage_for(state: &AppState, username: &str, exclude_deployment: Option<&str>) -> Result<Usage, ApiError> {
+    let deployments = list_deployments(state).await?;
+    Ok(usage_by_owner(&deployments, exclude_deployment).get(username).copied().unwrap_or_default())
 }
 
 fn format_gib(bytes: i64) -> String {
@@ -101,12 +150,11 @@ pub async fn check_quota(
         return Ok(());
     }
     let (limits, _, _) = effective_quota(state, user).await?;
-    let pods = state.snapshot().await;
-    let (used_cpu, used_mem, used_gpu) = usage_from_pods(&pods, &user.username, exclude_deployment);
+    let used = usage_for(state, &user.username, exclude_deployment).await?;
 
-    let total_cpu = used_cpu + additional_cpu_millicores;
-    let total_mem = used_mem + additional_memory_bytes;
-    let total_gpu = used_gpu + additional_gpu_count;
+    let total_cpu = used.cpu_millicores + additional_cpu_millicores;
+    let total_mem = used.memory_bytes + additional_memory_bytes;
+    let total_gpu = used.gpu_count + additional_gpu_count;
 
     if let Some(limit) = &limits.cpu_limit
         && let Some(limit_millicores) = parse_cpu_millicores(&Quantity(limit.clone()))
@@ -159,17 +207,16 @@ pub async fn my_quota(user: CurrentUser, State(state): State<AppState>) -> Resul
     // Fixed requests are a global-only setting (not per-user), and purely
     // informational here — the frontend never sends them back.
     let global = load_global_settings(&state.pg).await?;
-    let pods = state.snapshot().await;
-    let (used_cpu, used_mem, used_gpu) = usage_from_pods(&pods, &user.username, None);
+    let used = usage_for(&state, &user.username, None).await?;
     Ok(Json(MyQuota {
         limits,
         is_override,
         expose_resource_requests,
         fixed_cpu_request: global.fixed_cpu_request,
         fixed_memory_request: global.fixed_memory_request,
-        used_cpu_millicores: used_cpu,
-        used_memory_bytes: used_mem,
-        used_gpu_count: used_gpu,
+        used_cpu_millicores: used.cpu_millicores,
+        used_memory_bytes: used.memory_bytes,
+        used_gpu_count: used.gpu_count,
     }))
 }
 
@@ -224,18 +271,19 @@ pub async fn list_user_quotas(
         .map(|(id, cpu_limit, memory_limit, gpu_limit)| (id, QuotaLimits { cpu_limit, memory_limit, gpu_limit }))
         .collect();
 
-    let pods = state.snapshot().await;
+    let deployments = list_deployments(&state).await?;
+    let usage = usage_by_owner(&deployments, None);
     let entries = users
         .into_iter()
         .map(|(id, username)| {
-            let (cpu, mem, gpu) = usage_from_pods(&pods, &username, None);
+            let used = usage.get(&username).copied().unwrap_or_default();
             UserQuotaEntry {
                 quota_override: overrides.get(&id).cloned(),
                 user_id: id,
                 username,
-                used_cpu_millicores: cpu,
-                used_memory_bytes: mem,
-                used_gpu_count: gpu,
+                used_cpu_millicores: used.cpu_millicores,
+                used_memory_bytes: used.memory_bytes,
+                used_gpu_count: used.gpu_count,
             }
         })
         .collect();
@@ -266,4 +314,116 @@ pub async fn set_user_quota(
 pub async fn clear_user_quota(_admin: AdminUser, State(state): State<AppState>, Path(id): Path<i32>) -> Result<(), ApiError> {
     sqlx::query("DELETE FROM user_quotas WHERE user_id = $1").bind(id).execute(&state.pg).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use k8s_openapi::api::apps::v1::DeploymentSpec;
+    use k8s_openapi::api::core::v1::{Container, PodSpec, PodTemplateSpec, ResourceRequirements};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use std::collections::BTreeMap;
+
+    fn deployment(name: &str, owner: Option<&str>, replicas: i32, limits: &[(&str, &str)]) -> Deployment {
+        let limits: BTreeMap<String, Quantity> =
+            limits.iter().map(|(k, v)| (k.to_string(), Quantity(v.to_string()))).collect();
+        let mut labels = BTreeMap::new();
+        if let Some(owner) = owner {
+            labels.insert(OWNER_LABEL.to_string(), owner.to_string());
+        }
+        Deployment {
+            metadata: ObjectMeta { name: Some(name.to_string()), labels: Some(labels), ..Default::default() },
+            spec: Some(DeploymentSpec {
+                replicas: Some(replicas),
+                template: PodTemplateSpec {
+                    spec: Some(PodSpec {
+                        containers: vec![Container {
+                            name: name.to_string(),
+                            resources: Some(ResourceRequirements {
+                                limits: (!limits.is_empty()).then_some(limits),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            status: None,
+        }
+    }
+
+    #[test]
+    fn sums_limits_multiplied_by_replicas() {
+        let deployments = vec![deployment("a", Some("alice"), 3, &[("cpu", "500m"), ("memory", "1Gi")])];
+        let usage = usage_by_owner(&deployments, None);
+        let alice = usage.get("alice").unwrap();
+        assert_eq!(alice.cpu_millicores, 1500);
+        assert_eq!(alice.memory_bytes, 3 * 1024 * 1024 * 1024);
+        assert_eq!(alice.gpu_count, 0);
+    }
+
+    #[test]
+    fn keeps_each_owner_separate() {
+        let deployments = vec![
+            deployment("a", Some("alice"), 1, &[("cpu", "1")]),
+            deployment("b", Some("bob"), 1, &[("cpu", "2")]),
+            deployment("c", Some("alice"), 2, &[("cpu", "250m")]),
+        ];
+        let usage = usage_by_owner(&deployments, None);
+        assert_eq!(usage.get("alice").unwrap().cpu_millicores, 1000 + 500);
+        assert_eq!(usage.get("bob").unwrap().cpu_millicores, 2000);
+    }
+
+    #[test]
+    fn counts_any_extended_resource_as_gpu_regardless_of_vendor() {
+        let deployments = vec![
+            deployment("a", Some("alice"), 2, &[("nvidia.com/gpu", "1")]),
+            deployment("b", Some("alice"), 1, &[("amd.com/gpu", "3")]),
+        ];
+        assert_eq!(usage_by_owner(&deployments, None).get("alice").unwrap().gpu_count, 2 + 3);
+    }
+
+    #[test]
+    fn ignores_deployments_aether_did_not_launch() {
+        // No owner label: someone else's workload in this namespace, not
+        // attributable to any account.
+        let deployments = vec![deployment("stray", None, 5, &[("cpu", "8")])];
+        assert!(usage_by_owner(&deployments, None).is_empty());
+    }
+
+    #[test]
+    fn excluding_a_deployment_drops_only_that_one() {
+        // Editing "a" must be judged against what it would become, not
+        // double-counted against what it already is.
+        let deployments = vec![
+            deployment("a", Some("alice"), 1, &[("cpu", "1")]),
+            deployment("b", Some("alice"), 1, &[("cpu", "2")]),
+        ];
+        assert_eq!(usage_by_owner(&deployments, Some("a")).get("alice").unwrap().cpu_millicores, 2000);
+        assert_eq!(usage_by_owner(&deployments, Some("b")).get("alice").unwrap().cpu_millicores, 1000);
+        assert_eq!(usage_by_owner(&deployments, None).get("alice").unwrap().cpu_millicores, 3000);
+    }
+
+    #[test]
+    fn treats_a_missing_replica_count_as_one() {
+        // Kubernetes defaults spec.replicas to 1 when it is omitted.
+        let mut d = deployment("a", Some("alice"), 1, &[("cpu", "1")]);
+        d.spec.as_mut().unwrap().replicas = None;
+        assert_eq!(usage_by_owner(&[d], None).get("alice").unwrap().cpu_millicores, 1000);
+    }
+
+    #[test]
+    fn scaling_to_zero_reserves_nothing() {
+        let deployments = vec![deployment("a", Some("alice"), 0, &[("cpu", "8"), ("memory", "64Gi")])];
+        assert_eq!(usage_by_owner(&deployments, None).get("alice").copied().unwrap_or_default(), Usage::default());
+    }
+
+    #[test]
+    fn deployments_without_limits_contribute_nothing() {
+        let deployments = vec![deployment("a", Some("alice"), 2, &[])];
+        assert_eq!(usage_by_owner(&deployments, None).get("alice").copied().unwrap_or_default(), Usage::default());
+    }
 }
