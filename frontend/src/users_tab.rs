@@ -1,8 +1,10 @@
 use common::{CreateUserRequest, ResetPasswordRequest, Role, SetNodeLabelRequest, UserInfo};
-use gloo_net::http::Request;
 use leptos::prelude::*;
 use leptos::tachys::dom::event_target_value;
 use leptos::task::spawn_local;
+
+use crate::api;
+use crate::result_banner::{ErrorBanner, ResultBanner};
 
 #[component]
 pub fn UsersTab() -> impl IntoView {
@@ -28,15 +30,11 @@ pub fn UsersTab() -> impl IntoView {
 
     let refresh = move || {
         spawn_local(async move {
-            match Request::get("/api/users").send().await {
-                Ok(resp) if resp.ok() => match resp.json::<Vec<UserInfo>>().await {
-                    Ok(list) => {
-                        list_error.set(None);
-                        users.set(list);
-                    }
-                    Err(err) => list_error.set(Some(format!("failed to parse user list: {err}"))),
-                },
-                Ok(resp) => list_error.set(Some(format!("failed to load users: HTTP {}", resp.status()))),
+            match api::get_json::<Vec<UserInfo>>("/api/users").await {
+                Ok(list) => {
+                    list_error.set(None);
+                    users.set(list);
+                }
                 Err(err) => list_error.set(Some(format!("failed to load users: {err}"))),
             }
         });
@@ -51,13 +49,8 @@ pub fn UsersTab() -> impl IntoView {
             return;
         }
         spawn_local(async move {
-            match Request::delete(&format!("/api/users/{id}")).send().await {
-                Ok(resp) if resp.ok() => refresh(),
-                Ok(resp) => {
-                    let body: serde_json::Value = resp.json().await.unwrap_or_default();
-                    let message = body.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");
-                    list_error.set(Some(format!("failed to delete user: {message}")));
-                }
+            match api::delete(&format!("/api/users/{id}")).await {
+                Ok(()) => refresh(),
                 Err(err) => list_error.set(Some(format!("failed to delete user: {err}"))),
             }
         });
@@ -93,7 +86,7 @@ pub fn UsersTab() -> impl IntoView {
 
     view! {
         <div class="tab-panel">
-            {move || list_error.get().map(|msg| view! { <div class="error">{msg}</div> })}
+            <ErrorBanner error=list_error />
 
             <div class="table-wrap">
                 <table>
@@ -206,12 +199,7 @@ pub fn UsersTab() -> impl IntoView {
                         }
                     })
             }}
-            {move || {
-                reset_result.get().map(|res| match res {
-                    Ok(msg) => view! { <div class="success">{msg}</div> }.into_any(),
-                    Err(msg) => view! { <div class="error">{msg}</div> }.into_any(),
-                })
-            }}
+            <ResultBanner result=reset_result />
 
             {move || {
                 label_target
@@ -265,12 +253,7 @@ pub fn UsersTab() -> impl IntoView {
                         }
                     })
             }}
-            {move || {
-                label_result.get().map(|res| match res {
-                    Ok(msg) => view! { <div class="success">{msg}</div> }.into_any(),
-                    Err(msg) => view! { <div class="error">{msg}</div> }.into_any(),
-                })
-            }}
+            <ResultBanner result=label_result />
 
             <h3 class="section-heading">"New user"</h3>
             <form class="deploy-form" on:submit=on_submit>
@@ -307,12 +290,7 @@ pub fn UsersTab() -> impl IntoView {
                 </button>
             </form>
 
-            {move || {
-                form_result.get().map(|res| match res {
-                    Ok(msg) => view! { <div class="success">{msg}</div> }.into_any(),
-                    Err(msg) => view! { <div class="error">{msg}</div> }.into_any(),
-                })
-            }}
+            <ResultBanner result=form_result />
         </div>
     }
 }
@@ -321,53 +299,20 @@ async fn set_node_label(id: i32, value: String) -> Result<String, String> {
     let trimmed = value.trim();
     let node_label = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
     let cleared = node_label.is_none();
-    let resp = Request::put(&format!("/api/users/{id}/node-label"))
-        .json(&SetNodeLabelRequest { node_label })
-        .map_err(|err| format!("failed to encode request: {err}"))?
-        .send()
+    let _: UserInfo = api::put_json(&format!("/api/users/{id}/node-label"), &SetNodeLabelRequest { node_label })
         .await
-        .map_err(|err| format!("request failed: {err}"))?;
-
-    if resp.ok() {
-        Ok(if cleared { "Node label cleared.".to_string() } else { "Node label saved.".to_string() })
-    } else {
-        let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        let message = body.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");
-        Err(format!("Failed to save node label: {message}"))
-    }
+        .map_err(|err| format!("Failed to save node label: {err}"))?;
+    Ok(if cleared { "Node label cleared.".to_string() } else { "Node label saved.".to_string() })
 }
 
 async fn reset_password(id: i32, password: String) -> Result<String, String> {
-    let resp = Request::put(&format!("/api/users/{id}/password"))
-        .json(&ResetPasswordRequest { password })
-        .map_err(|err| format!("failed to encode request: {err}"))?
-        .send()
+    api::put_empty(&format!("/api/users/{id}/password"), &ResetPasswordRequest { password })
         .await
-        .map_err(|err| format!("request failed: {err}"))?;
-
-    if resp.ok() {
-        Ok("Password reset — that account's existing sessions have been logged out.".to_string())
-    } else {
-        let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        let message = body.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");
-        Err(format!("Failed to reset password: {message}"))
-    }
+        .map_err(|err| format!("Failed to reset password: {err}"))?;
+    Ok("Password reset — that account's existing sessions have been logged out.".to_string())
 }
 
 async fn create(req: CreateUserRequest) -> Result<String, String> {
-    let resp = Request::post("/api/users")
-        .json(&req)
-        .map_err(|err| format!("failed to encode request: {err}"))?
-        .send()
-        .await
-        .map_err(|err| format!("request failed: {err}"))?;
-
-    if resp.ok() {
-        let created: UserInfo = resp.json().await.map_err(|err| format!("failed to parse response: {err}"))?;
-        Ok(format!("Created user \"{}\".", created.username))
-    } else {
-        let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        let message = body.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");
-        Err(format!("Failed to create user: {message}"))
-    }
+    let created: UserInfo = api::post_json("/api/users", &req).await.map_err(|err| format!("Failed to create user: {err}"))?;
+    Ok(format!("Created user \"{}\".", created.username))
 }

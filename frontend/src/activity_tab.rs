@@ -1,7 +1,9 @@
 use common::{LaunchLogEntry, SessionLogEntry};
-use gloo_net::http::Request;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+
+use crate::api;
+use crate::result_banner::{ErrorBanner};
 
 /// Login and launch history — everyone's, for an admin (with a Username
 /// column); only your own, for a `user` account (same visibility split as
@@ -15,23 +17,15 @@ pub fn ActivityTab(is_admin: bool) -> impl IntoView {
     let launches_error = RwSignal::new(None::<String>);
 
     spawn_local(async move {
-        match Request::get("/api/sessions").send().await {
-            Ok(resp) if resp.ok() => match resp.json::<Vec<SessionLogEntry>>().await {
-                Ok(list) => sessions.set(list),
-                Err(err) => sessions_error.set(Some(format!("failed to parse login history: {err}"))),
-            },
-            Ok(resp) => sessions_error.set(Some(format!("failed to load login history: HTTP {}", resp.status()))),
+        match api::get_json::<Vec<SessionLogEntry>>("/api/sessions").await {
+            Ok(list) => sessions.set(list),
             Err(err) => sessions_error.set(Some(format!("failed to load login history: {err}"))),
         }
     });
 
     spawn_local(async move {
-        match Request::get("/api/launches").send().await {
-            Ok(resp) if resp.ok() => match resp.json::<Vec<LaunchLogEntry>>().await {
-                Ok(list) => launches.set(list),
-                Err(err) => launches_error.set(Some(format!("failed to parse launch history: {err}"))),
-            },
-            Ok(resp) => launches_error.set(Some(format!("failed to load launch history: HTTP {}", resp.status()))),
+        match api::get_json::<Vec<LaunchLogEntry>>("/api/launches").await {
+            Ok(list) => launches.set(list),
             Err(err) => launches_error.set(Some(format!("failed to load launch history: {err}"))),
         }
     });
@@ -39,7 +33,7 @@ pub fn ActivityTab(is_admin: bool) -> impl IntoView {
     view! {
         <div class="tab-panel">
             <h3 class="section-heading">"Recent logins"</h3>
-            {move || sessions_error.get().map(|msg| view! { <div class="error">{msg}</div> })}
+            <ErrorBanner error=sessions_error />
             <div class="table-wrap">
                 <table>
                     <thead>
@@ -67,7 +61,7 @@ pub fn ActivityTab(is_admin: bool) -> impl IntoView {
             </div>
 
             <h3 class="section-heading">"Recent launches"</h3>
-            {move || launches_error.get().map(|msg| view! { <div class="error">{msg}</div> })}
+            <ErrorBanner error=launches_error />
             <div class="table-wrap">
                 <table>
                     <thead>

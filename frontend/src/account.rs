@@ -1,8 +1,9 @@
 use common::ChangePasswordRequest;
-use gloo_net::http::Request;
 use leptos::prelude::*;
 use leptos::tachys::dom::event_target_value;
 use leptos::task::spawn_local;
+
+use crate::api;
 
 #[component]
 pub fn ChangePasswordPanel(open: RwSignal<bool>) -> impl IntoView {
@@ -100,18 +101,6 @@ pub fn ChangePasswordPanel(open: RwSignal<bool>) -> impl IntoView {
 }
 
 async fn submit(req: ChangePasswordRequest) -> Result<String, String> {
-    let resp = Request::put("/api/me/password")
-        .json(&req)
-        .map_err(|err| format!("failed to encode request: {err}"))?
-        .send()
-        .await
-        .map_err(|err| format!("request failed: {err}"))?;
-
-    if resp.ok() {
-        Ok("Password changed. Your other sessions have been logged out.".to_string())
-    } else {
-        let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        let message = body.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");
-        Err(format!("Failed to change password: {message}"))
-    }
+    api::put_empty("/api/me/password", &req).await.map_err(|err| format!("Failed to change password: {err}"))?;
+    Ok("Password changed. Your other sessions have been logged out.".to_string())
 }

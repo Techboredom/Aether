@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
 use common::PodInfo;
-use gloo_net::http::Request;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+
+use crate::api;
 
 use crate::pod_detail::PodDetailPanel;
 use crate::{format, ws};
@@ -16,16 +17,12 @@ pub fn PodsTab(is_admin: bool) -> impl IntoView {
     let selected_pod: RwSignal<Option<String>> = RwSignal::new(None);
 
     spawn_local(async move {
-        match Request::get("/api/pods").send().await {
-            Ok(resp) if resp.ok() => match resp.json::<Vec<PodInfo>>().await {
-                Ok(list) => pods.update(|map| {
-                    for pod in list {
-                        map.insert(pod.name.clone(), pod);
-                    }
-                }),
-                Err(err) => error.set(Some(format!("failed to parse initial pod list: {err}"))),
-            },
-            Ok(resp) => error.set(Some(format!("failed to load pods: HTTP {}", resp.status()))),
+        match api::get_json::<Vec<PodInfo>>("/api/pods").await {
+            Ok(list) => pods.update(|map| {
+                for pod in list {
+                    map.insert(pod.name.clone(), pod);
+                }
+            }),
             Err(err) => error.set(Some(format!("failed to load pods: {err}"))),
         }
         ws::run(pods, connected, error).await;

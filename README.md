@@ -97,6 +97,8 @@ frontend/src/templates_tab.rs   Templates admin tab (CRUD)
 frontend/src/images_tab.rs      Images admin tab (CRUD, backs "Custom" mode on Launch)
 frontend/src/users_tab.rs       Users admin tab (CRUD)
 frontend/src/env_editor.rs      Shared add/remove env-var-row widget (Launch + Templates)
+frontend/src/api.rs             Typed wrappers over gloo_net (encode, send, decode the backend's error body)
+frontend/src/result_banner.rs   Shared success/error banner components every form uses
 frontend/src/theme.rs           Light/dark theme toggle (data-theme attribute + localStorage)
 Dockerfile                 Multi-stage build: compiles both crates, ships a distroless image
 .forgejo/                  Forgejo Actions workflow that builds and pushes the image, then bumps the deploy repo

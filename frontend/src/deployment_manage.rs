@@ -1,9 +1,11 @@
 use common::{DeploymentDetail, MyQuota, UpdateDeploymentRequest};
-use gloo_net::http::Request;
 use leptos::prelude::*;
 use leptos::tachys::dom::event_target_value;
 use leptos::task::spawn_local;
 
+use crate::result_banner::{ErrorBanner};
+
+use crate::api;
 use crate::env_editor::{EnvVars, EnvVarsEditor};
 use crate::format::{fixed_request_note, quota_summary};
 
@@ -34,18 +36,15 @@ pub fn ManageDeploymentSection(deployment_name: String, selected: RwSignal<Optio
     let expose_requests = move || my_quota.get().map(|q| q.expose_resource_requests).unwrap_or(true);
 
     spawn_local(async move {
-        if let Ok(resp) = Request::get("/api/quota/me").send().await
-            && resp.ok()
-                && let Ok(quota) = resp.json::<MyQuota>().await {
-                    my_quota.set(Some(quota));
-                }
+        if let Ok(quota) = api::get_json::<MyQuota>("/api/quota/me").await {
+            my_quota.set(Some(quota));
+        }
     });
 
     {
         let name = deployment_name.clone();
         spawn_local(async move {
-            match Request::get(&format!("/api/deployments/{name}")).send().await {
-                Ok(resp) if resp.ok() => match resp.json::<DeploymentDetail>().await {
+            match api::get_json::<DeploymentDetail>(&format!("/api/deployments/{name}")).await {
                     Ok(detail) => {
                         replicas.set(detail.replicas);
                         cpu_request.set(detail.cpu_request.unwrap_or_default());
@@ -55,10 +54,7 @@ pub fn ManageDeploymentSection(deployment_name: String, selected: RwSignal<Optio
                         env_vars.set_from(&detail.env);
                         generated_secret_key.set(detail.generated_secret_key);
                     }
-                    Err(err) => load_error.set(Some(format!("failed to parse deployment: {err}"))),
-                },
-                Ok(resp) => load_error.set(Some(format!("failed to load deployment: HTTP {}", resp.status()))),
-                Err(err) => load_error.set(Some(format!("failed to load deployment: {err}"))),
+                    Err(err) => load_error.set(Some(format!("failed to load deployment: {err}"))),
             }
             loading.set(false);
         });
@@ -124,11 +120,10 @@ pub fn ManageDeploymentSection(deployment_name: String, selected: RwSignal<Optio
                         deleting.set(true);
                         delete_error.set(None);
                         spawn_local(async move {
-                            let outcome = Request::delete(&format!("/api/deployments/{name}")).send().await;
+                            let outcome = api::delete(&format!("/api/deployments/{name}")).await;
                             deleting.set(false);
                             match outcome {
-                                Ok(resp) if resp.ok() => selected.set(None),
-                                Ok(resp) => delete_error.set(Some(format!("failed to delete: HTTP {}", resp.status()))),
+                                Ok(()) => selected.set(None),
                                 Err(err) => delete_error.set(Some(format!("failed to delete: {err}"))),
                             }
                         });
@@ -247,7 +242,7 @@ pub fn ManageDeploymentSection(deployment_name: String, selected: RwSignal<Optio
                                 {move || if deleting.get() { "Deleting…" } else { "Delete deployment" }}
                             </button>
                         </div>
-                        {move || delete_error.get().map(|msg| view! { <div class="error">{msg}</div> })}
+                        <ErrorBanner error=delete_error />
                     </div>
                 }
                     .into_any()
@@ -262,18 +257,7 @@ fn non_empty(s: String) -> Option<String> {
 }
 
 async fn save(name: &str, req: UpdateDeploymentRequest) -> Result<String, String> {
-    let resp = Request::put(&format!("/api/deployments/{name}"))
-        .json(&req)
-        .map_err(|err| format!("failed to encode request: {err}"))?
-        .send()
-        .await
-        .map_err(|err| format!("request failed: {err}"))?;
-
-    if resp.ok() {
-        Ok("Saved.".to_string())
-    } else {
-        let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        let message = body.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");
-        Err(format!("Failed to save: {message}"))
-    }
+    let _: DeploymentDetail =
+        api::put_json(&format!("/api/deployments/{name}"), &req).await.map_err(|err| format!("Failed to save: {err}"))?;
+    Ok("Saved.".to_string())
 }

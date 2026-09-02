@@ -6,6 +6,9 @@ use leptos::prelude::*;
 use leptos::tachys::dom::{event_target_checked, event_target_value};
 use leptos::task::spawn_local;
 
+use crate::api;
+use crate::result_banner::{ErrorBanner};
+
 use crate::deployment_manage::ManageDeploymentSection;
 
 #[component]
@@ -30,12 +33,8 @@ pub fn PodDetailPanel(
     {
         let pod_name = name.clone();
         spawn_local(async move {
-            match Request::get(&format!("/api/pods/{pod_name}/events")).send().await {
-                Ok(resp) if resp.ok() => match resp.json::<Vec<PodEventInfo>>().await {
-                    Ok(list) => events.set(list),
-                    Err(err) => events_error.set(Some(format!("failed to parse events: {err}"))),
-                },
-                Ok(resp) => events_error.set(Some(format!("failed to load events: HTTP {}", resp.status()))),
+            match api::get_json::<Vec<PodEventInfo>>(&format!("/api/pods/{pod_name}/events")).await {
+                Ok(list) => events.set(list),
                 Err(err) => events_error.set(Some(format!("failed to load events: {err}"))),
             }
         });
@@ -135,7 +134,7 @@ pub fn PodDetailPanel(
 
                 <section>
                     <h3>"Events"</h3>
-                    {move || events_error.get().map(|msg| view! { <div class="error">{msg}</div> })}
+                    <ErrorBanner error=events_error />
                     <Show when=move || events_error.get().is_none() && events.get().is_empty()>
                         <p class="empty">"No recent events."</p>
                     </Show>
@@ -187,7 +186,7 @@ pub fn PodDetailPanel(
                             {move || if loading_logs.get() { "Loading…" } else { "Refresh" }}
                         </button>
                     </div>
-                    {move || log_error.get().map(|msg| view! { <div class="error">{msg}</div> })}
+                    <ErrorBanner error=log_error />
                     <pre class="log-view">{move || log_text.get()}</pre>
                 </section>
             </div>
