@@ -15,6 +15,9 @@ pub enum ApiError {
     /// handshake failure, ...) — distinct from `BadRequest` since it's not
     /// the caller's fault.
     ProxyUnavailable(String),
+    /// Too many failed logins from one source address — see
+    /// `AppState::login_blocked`.
+    TooManyRequests(String),
 }
 
 impl From<kube::Error> for ApiError {
@@ -32,16 +35,29 @@ impl From<sqlx::Error> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
+            // The API server's own validation messages ("already exists",
+            // "must be no more than ...") are the most useful thing we can
+            // show, and say nothing the caller couldn't learn by asking it.
             ApiError::Kube(kube::Error::Api(status)) => (
                 StatusCode::from_u16(status.code).unwrap_or(StatusCode::BAD_GATEWAY),
                 status.message,
             ),
-            ApiError::Kube(err) => (StatusCode::BAD_GATEWAY, err.to_string()),
-            ApiError::Sqlx(err) => (StatusCode::SERVICE_UNAVAILABLE, err.to_string()),
+            // Everything below is an internal fault. The detail goes to the
+            // logs, not to the caller: a database error in particular quotes
+            // SQL and column names straight back at whoever triggered it.
+            ApiError::Kube(err) => {
+                tracing::error!(error = %err, "kubernetes request failed");
+                (StatusCode::BAD_GATEWAY, "the cluster could not be reached".to_string())
+            }
+            ApiError::Sqlx(err) => {
+                tracing::error!(error = %err, "database request failed");
+                (StatusCode::SERVICE_UNAVAILABLE, "the database could not be reached".to_string())
+            }
             ApiError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "not logged in".to_string()),
             ApiError::Forbidden(message) => (StatusCode::FORBIDDEN, message),
             ApiError::ProxyUnavailable(message) => (StatusCode::BAD_GATEWAY, message),
+            ApiError::TooManyRequests(message) => (StatusCode::TOO_MANY_REQUESTS, message),
         };
         (status, Json(json!({ "error": message }))).into_response()
     }

@@ -21,6 +21,17 @@ use crate::resources::{parse_count, parse_cpu_millicores, parse_memory_bytes, OW
 use crate::state::AppState;
 use crate::validate;
 
+/// Trims a client-supplied quantity and treats blank as absent.
+///
+/// The forms submit "" for a field the user cleared. Passing that straight
+/// through would put an empty `Quantity` into the pod spec, which the API
+/// server rejects with a message about the *resource list* rather than about
+/// the field the user actually left empty — so normalize it to "unset" here,
+/// which is what they meant.
+pub fn normalize_quantity(value: Option<String>) -> Option<String> {
+    value.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
 /// Parses a user's admin-set "key=value" node label (validated at
 /// write-time by `validate::node_label`, so this only ever sees a
 /// well-formed value) into the single-entry map `PodSpec::node_selector`
@@ -51,6 +62,12 @@ pub async fn create_deployment(
     State(state): State<AppState>,
     Json(req): Json<CreateDeploymentRequest>,
 ) -> Result<Json<CreateDeploymentResponse>, ApiError> {
+    let mut req = req;
+    req.cpu_request = normalize_quantity(req.cpu_request.take());
+    req.cpu_limit = normalize_quantity(req.cpu_limit.take());
+    req.memory_request = normalize_quantity(req.memory_request.take());
+    req.memory_limit = normalize_quantity(req.memory_limit.take());
+
     validate::k8s_name("name", &req.name)?;
     validate::image_ref(&req.image)?;
     if req.replicas < 0 {
@@ -207,7 +224,18 @@ pub async fn create_deployment(
     };
 
     let deployments: Api<Deployment> = Api::namespaced(state.client.clone(), &state.namespace);
-    let created = deployments.create(&PostParams::default(), &deployment).await?;
+    let created = deployments.create(&PostParams::default(), &deployment).await.map_err(|err| {
+        // Deployment names are unique per namespace, and every user shares
+        // one namespace — so a clash may well be with someone else's
+        // deployment, which the bare API-server message doesn't hint at.
+        match &err {
+            kube::Error::Api(status) if status.code == 409 => ApiError::BadRequest(format!(
+                "a deployment named \"{}\" already exists — names are shared across all users here, so pick another",
+                req.name
+            )),
+            _ => ApiError::from(err),
+        }
+    })?;
     // The new footprint is now visible to the next quota check; everything
     // below is bookkeeping that doesn't affect it.
     drop(launch_guard);
@@ -465,6 +493,12 @@ pub async fn update_deployment(
     Path(name): Path<String>,
     Json(req): Json<UpdateDeploymentRequest>,
 ) -> Result<Json<DeploymentDetail>, ApiError> {
+    let mut req = req;
+    req.cpu_request = normalize_quantity(req.cpu_request.take());
+    req.cpu_limit = normalize_quantity(req.cpu_limit.take());
+    req.memory_request = normalize_quantity(req.memory_request.take());
+    req.memory_limit = normalize_quantity(req.memory_limit.take());
+
     if req.replicas < 0 {
         return Err(ApiError::BadRequest("replicas must not be negative".into()));
     }

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use common::{PodEvent, PodInfo};
 use kube::Client;
@@ -59,30 +61,121 @@ impl ProxyOrigin {
     }
 }
 
+/// How many failed logins from one address, within [`LOGIN_FAILURE_WINDOW`],
+/// before further attempts are refused outright.
+const MAX_LOGIN_FAILURES: usize = 10;
+const LOGIN_FAILURE_WINDOW: Duration = Duration::from_secs(300);
+
+/// Per-source-address failed-login tracking.
+///
+/// Beyond slowing password guessing, this caps an unauthenticated CPU drain:
+/// verifying a password runs argon2, which is expensive *by design*, so an
+/// attacker who doesn't care about guessing correctly could otherwise pin the
+/// server's cores with a stream of junk logins.
+#[derive(Clone)]
+pub struct LoginThrottle {
+    failures: Arc<Mutex<HashMap<IpAddr, Vec<Instant>>>>,
+    max_failures: usize,
+    window: Duration,
+}
+
+impl Default for LoginThrottle {
+    fn default() -> Self {
+        Self::new(MAX_LOGIN_FAILURES, LOGIN_FAILURE_WINDOW)
+    }
+}
+
+impl LoginThrottle {
+    pub fn new(max_failures: usize, window: Duration) -> Self {
+        Self { failures: Arc::new(Mutex::new(HashMap::new())), max_failures, window }
+    }
+
+    /// Whether `ip` has failed enough logins recently to be turned away
+    /// without checking its password at all.
+    pub async fn blocked(&self, ip: IpAddr) -> bool {
+        let mut failures = self.failures.lock().await;
+        let Some(recent) = failures.get_mut(&ip) else { return false };
+        recent.retain(|at| at.elapsed() < self.window);
+        if recent.is_empty() {
+            failures.remove(&ip);
+            return false;
+        }
+        recent.len() >= self.max_failures
+    }
+
+    pub async fn record_failure(&self, ip: IpAddr) {
+        let mut failures = self.failures.lock().await;
+        // Swept here as well as in `blocked`, so a stream of one-off source
+        // addresses can't grow this map without bound.
+        failures.retain(|_, recent| {
+            recent.retain(|at| at.elapsed() < self.window);
+            !recent.is_empty()
+        });
+        failures.entry(ip).or_default().push(Instant::now());
+    }
+
+    /// Clears an address's history, so a few typos followed by the right
+    /// password don't leave someone throttled.
+    pub async fn clear(&self, ip: IpAddr) {
+        self.failures.lock().await.remove(&ip);
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub namespace: String,
     pub client: Client,
     pub pg: PgPool,
+    /// Public origin this app is served from, when it's been configured.
+    /// Its scheme is what decides whether cookies may be marked `Secure`.
+    pub app_origin: Option<String>,
     /// `None` = legacy same-origin `/proxy/<name>/` mode; see [`ProxyOrigin`].
     pub proxy_origin: Option<ProxyOrigin>,
     launches: Arc<Mutex<()>>,
+    login_throttle: LoginThrottle,
     pods: Arc<RwLock<HashMap<String, PodInfo>>>,
     events: broadcast::Sender<PodEvent>,
 }
 
 impl AppState {
-    pub fn new(namespace: String, client: Client, pg: PgPool, proxy_origin: Option<ProxyOrigin>) -> Self {
+    pub fn new(
+        namespace: String,
+        client: Client,
+        pg: PgPool,
+        app_origin: Option<String>,
+        proxy_origin: Option<ProxyOrigin>,
+    ) -> Self {
         let (events, _) = broadcast::channel(256);
         Self {
             namespace,
             client,
             pg,
+            app_origin,
             proxy_origin,
             launches: Arc::new(Mutex::new(())),
+            login_throttle: LoginThrottle::default(),
             pods: Arc::new(RwLock::new(HashMap::new())),
             events,
         }
+    }
+
+    /// Whether cookies may carry the `Secure` attribute — true only when
+    /// this app is served over HTTPS, since a `Secure` cookie is simply never
+    /// sent back over plain HTTP and would lock everyone out.
+    pub fn cookies_secure(&self) -> bool {
+        self.app_origin.as_deref().map(|origin| origin.starts_with("https://")).unwrap_or(false)
+    }
+
+    pub async fn login_blocked(&self, ip: IpAddr) -> bool {
+        self.login_throttle.blocked(ip).await
+    }
+
+    pub async fn record_login_failure(&self, ip: IpAddr) {
+        self.login_throttle.record_failure(ip).await;
+    }
+
+    pub async fn clear_login_failures(&self, ip: IpAddr) {
+        self.login_throttle.clear(ip).await;
     }
 
     /// Serializes quota-checked writes (launch, scale, edit).
@@ -142,6 +235,54 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ip(last: u8) -> IpAddr {
+        IpAddr::from([192, 168, 10, last])
+    }
+
+    #[tokio::test]
+    async fn blocks_only_after_the_limit_is_reached() {
+        let throttle = LoginThrottle::new(3, Duration::from_secs(300));
+        assert!(!throttle.blocked(ip(1)).await);
+
+        throttle.record_failure(ip(1)).await;
+        throttle.record_failure(ip(1)).await;
+        assert!(!throttle.blocked(ip(1)).await, "under the limit should still be allowed");
+
+        throttle.record_failure(ip(1)).await;
+        assert!(throttle.blocked(ip(1)).await);
+    }
+
+    #[tokio::test]
+    async fn throttling_is_per_address() {
+        let throttle = LoginThrottle::new(2, Duration::from_secs(300));
+        throttle.record_failure(ip(1)).await;
+        throttle.record_failure(ip(1)).await;
+        assert!(throttle.blocked(ip(1)).await);
+        // One noisy address must not lock everyone else out.
+        assert!(!throttle.blocked(ip(2)).await);
+    }
+
+    #[tokio::test]
+    async fn a_successful_login_clears_the_history() {
+        let throttle = LoginThrottle::new(2, Duration::from_secs(300));
+        throttle.record_failure(ip(1)).await;
+        throttle.record_failure(ip(1)).await;
+        assert!(throttle.blocked(ip(1)).await);
+
+        throttle.clear(ip(1)).await;
+        assert!(!throttle.blocked(ip(1)).await, "typos then the right password shouldn't leave you locked out");
+    }
+
+    #[tokio::test]
+    async fn failures_expire_out_of_the_window() {
+        let throttle = LoginThrottle::new(1, Duration::from_millis(20));
+        throttle.record_failure(ip(1)).await;
+        assert!(throttle.blocked(ip(1)).await);
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(!throttle.blocked(ip(1)).await, "the lockout should lift once the window passes");
+    }
 
     fn origin() -> ProxyOrigin {
         ProxyOrigin {

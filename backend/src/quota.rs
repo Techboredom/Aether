@@ -14,7 +14,6 @@ use crate::resources::{parse_count, parse_cpu_millicores, parse_memory_bytes, OW
 use crate::state::AppState;
 use crate::validate;
 
-#[derive(Default)]
 pub struct GlobalSettings {
     pub limits: QuotaLimits,
     pub expose_resource_requests: bool,
@@ -22,15 +21,31 @@ pub struct GlobalSettings {
     pub fixed_memory_request: Option<String>,
 }
 
+impl Default for GlobalSettings {
+    fn default() -> Self {
+        // Mirrors the column defaults in 0009_add_quotas.sql — in particular
+        // `expose_resource_requests` is true, so falling back here can't
+        // silently hide the request fields from everyone.
+        Self { limits: QuotaLimits::default(), expose_resource_requests: true, fixed_cpu_request: None, fixed_memory_request: None }
+    }
+}
+
 type GlobalSettingsRow = (Option<String>, Option<String>, Option<i32>, bool, Option<String>, Option<String>);
 
 pub async fn load_global_settings(pg: &PgPool) -> Result<GlobalSettings, ApiError> {
-    let row: GlobalSettingsRow = sqlx::query_as(
+    // `fetch_optional`, not `fetch_one`: the singleton row is created by the
+    // migration, but if it ever went missing every launch would start failing
+    // with a 500 rather than falling back to "no quota configured".
+    let row: Option<GlobalSettingsRow> = sqlx::query_as(
         "SELECT cpu_limit, memory_limit, gpu_limit, expose_resource_requests, fixed_cpu_request, fixed_memory_request \
          FROM quota_settings WHERE id = 1",
     )
-    .fetch_one(pg)
+    .fetch_optional(pg)
     .await?;
+    let Some(row) = row else {
+        tracing::warn!("quota_settings row is missing — falling back to unlimited defaults");
+        return Ok(GlobalSettings::default());
+    };
     Ok(GlobalSettings {
         limits: QuotaLimits { cpu_limit: row.0, memory_limit: row.1, gpu_limit: row.2 },
         expose_resource_requests: row.3,
@@ -52,14 +67,19 @@ async fn load_user_override(pg: &PgPool, user_id: i32) -> Result<Option<QuotaLim
 /// admin's `limits` always come back unlimited, since admins are exempt
 /// from enforcement, but `expose_resource_requests` is a UI setting that
 /// still applies to everyone.
-async fn effective_quota(state: &AppState, user: &CurrentUser) -> Result<(QuotaLimits, bool, bool), ApiError> {
-    let global = load_global_settings(&state.pg).await?;
+/// Takes the already-loaded global settings rather than reading them again,
+/// so a request that needs both costs one query instead of two.
+async fn effective_quota(
+    state: &AppState,
+    user: &CurrentUser,
+    global: &GlobalSettings,
+) -> Result<(QuotaLimits, bool), ApiError> {
     if user.role == Role::Admin {
-        return Ok((QuotaLimits::default(), false, global.expose_resource_requests));
+        return Ok((QuotaLimits::default(), false));
     }
     match load_user_override(&state.pg, user.id).await? {
-        Some(over) => Ok((over, true, global.expose_resource_requests)),
-        None => Ok((global.limits, false, global.expose_resource_requests)),
+        Some(over) => Ok((over, true)),
+        None => Ok((global.limits.clone(), false)),
     }
 }
 
@@ -149,7 +169,8 @@ pub async fn check_quota(
     if user.role == Role::Admin {
         return Ok(());
     }
-    let (limits, _, _) = effective_quota(state, user).await?;
+    let global = load_global_settings(&state.pg).await?;
+    let (limits, _) = effective_quota(state, user, &global).await?;
     let used = usage_for(state, &user.username, exclude_deployment).await?;
 
     let total_cpu = used.cpu_millicores + additional_cpu_millicores;
@@ -203,10 +224,11 @@ fn validate_limits(limits: &QuotaLimits) -> Result<(), ApiError> {
 /// and the Pods tab's manage panel, both of which need
 /// `expose_resource_requests` regardless of role.
 pub async fn my_quota(user: CurrentUser, State(state): State<AppState>) -> Result<Json<MyQuota>, ApiError> {
-    let (limits, is_override, expose_resource_requests) = effective_quota(&state, &user).await?;
     // Fixed requests are a global-only setting (not per-user), and purely
     // informational here — the frontend never sends them back.
     let global = load_global_settings(&state.pg).await?;
+    let (limits, is_override) = effective_quota(&state, &user, &global).await?;
+    let expose_resource_requests = global.expose_resource_requests;
     let used = usage_for(&state, &user.username, None).await?;
     Ok(Json(MyQuota {
         limits,
@@ -233,8 +255,14 @@ pub async fn get_settings(_admin: AdminUser, State(state): State<AppState>) -> R
 pub async fn update_settings(
     _admin: AdminUser,
     State(state): State<AppState>,
-    Json(req): Json<QuotaSettings>,
+    Json(mut req): Json<QuotaSettings>,
 ) -> Result<Json<QuotaSettings>, ApiError> {
+    // A cleared field arrives as "" from the form; store it as NULL so it
+    // reads back as "unset" rather than as an unparseable quantity.
+    req.limits.cpu_limit = crate::deployments::normalize_quantity(req.limits.cpu_limit.take());
+    req.limits.memory_limit = crate::deployments::normalize_quantity(req.limits.memory_limit.take());
+    req.fixed_cpu_request = crate::deployments::normalize_quantity(req.fixed_cpu_request.take());
+    req.fixed_memory_request = crate::deployments::normalize_quantity(req.fixed_memory_request.take());
     validate_limits(&req.limits)?;
     if let Some(v) = &req.fixed_cpu_request {
         validate::quantity("fixed_cpu_request", v)?;
@@ -294,8 +322,10 @@ pub async fn set_user_quota(
     _admin: AdminUser,
     State(state): State<AppState>,
     Path(id): Path<i32>,
-    Json(req): Json<QuotaLimits>,
+    Json(mut req): Json<QuotaLimits>,
 ) -> Result<Json<QuotaLimits>, ApiError> {
+    req.cpu_limit = crate::deployments::normalize_quantity(req.cpu_limit.take());
+    req.memory_limit = crate::deployments::normalize_quantity(req.memory_limit.take());
     validate_limits(&req)?;
     sqlx::query(
         "INSERT INTO user_quotas (user_id, cpu_limit, memory_limit, gpu_limit) VALUES ($1, $2, $3, $4) \

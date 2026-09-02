@@ -129,6 +129,14 @@ pub async fn login(
     jar: CookieJar,
     Json(req): Json<LoginRequest>,
 ) -> Result<(CookieJar, Json<UserInfo>), ApiError> {
+    // Checked before argon2 runs, so a flood of junk logins can't be turned
+    // into a CPU exhaustion attack.
+    if state.login_blocked(addr.ip()).await {
+        return Err(ApiError::TooManyRequests(
+            "too many failed sign-in attempts from this address — wait a few minutes and try again".to_string(),
+        ));
+    }
+
     let row: Option<UserAuthRow> = sqlx::query_as("SELECT id, username, password_hash, role, node_label FROM users WHERE username = $1")
         .bind(&req.username)
         .fetch_optional(&state.pg)
@@ -136,8 +144,10 @@ pub async fn login(
 
     let row = row.filter(|r| verify_password(&r.password_hash, &req.password));
     let Some(row) = row else {
+        state.record_login_failure(addr.ip()).await;
         return Err(ApiError::Unauthorized);
     };
+    state.clear_login_failures(addr.ip()).await;
 
     let token = generate_token();
     sqlx::query("INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, now() + make_interval(days => $3))")
@@ -161,6 +171,10 @@ pub async fn login(
     let cookie = Cookie::build((SESSION_COOKIE, token))
         .path("/")
         .http_only(true)
+        // Only when the app is actually served over HTTPS: a `Secure` cookie
+        // is never sent back over plain HTTP, which would lock out a
+        // plain-HTTP deployment entirely. See AppState::cookies_secure.
+        .secure(state.cookies_secure())
         .same_site(SameSite::Lax)
         .max_age(Duration::days(SESSION_LIFETIME_DAYS))
         .build();
