@@ -6,6 +6,19 @@ on:
     tags: ["v*"]
   workflow_dispatch: {}
 
+env:
+  # GitHub's own runners default to Node 24 for JS-based actions since
+  # 2026-06-16 (Node 20 is fully removed there 2026-09-23); this workflow
+  # sets the same documented opt-in variable for act_runner's benefit.
+  # Unverified here, deliberately: this runner executes host-mode with no
+  # per-job container (see the `check`/`build` jobs' own comments below),
+  # so whether act_runner honors this the same way GitHub's hosted runner
+  # does - or instead needs an actual Node 24 binary reachable on the host,
+  # the way Node 20 (nodejs-lts-iron) had to be installed there directly
+  # for actions/checkout to run at all - needs checking against a real run
+  # on that runner, not something provable from outside it.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   # Gate: nothing gets built or pushed if the tests or lints fail. The runner
   # executes host-mode and has no Rust toolchain of its own, so this runs in
