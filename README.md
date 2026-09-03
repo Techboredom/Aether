@@ -679,25 +679,43 @@ CREATE TABLE launch_log (
 ## Building the container image
 
 Cross-compiling for `linux/amd64` from an arm64 machine (e.g. Apple Silicon)
-via QEMU reliably crashes `rustc`, so build this on a native amd64 box — CI
-handles this (see below). If you're already on amd64:
+via QEMU reliably crashes `rustc`, so build this on a native amd64 box for a
+single-platform image matching your own machine:
 
 ```
 docker build -t <registry>/aether/aether:latest .
 docker push <registry>/aether/aether:latest
 ```
 
+CI (both pipelines — see below) instead produces a multi-arch (amd64+arm64)
+image via `docker buildx build --platform linux/amd64,linux/arm64 --push`,
+so QEMU-emulated Rust compilation for whichever arch isn't the runner's own
+native one only ever happens there, on a schedule that doesn't care how
+long it takes — not on your own machine's build-edit-test loop.
+
 The image is a distroless (`gcr.io/distroless/cc-debian12:nonroot`) runtime
 containing just the compiled backend binary and the built frontend assets —
-no shell, runs as a non-root user.
+no shell, runs as a non-root user. It's multi-arch itself, so this
+Dockerfile needs no per-arch branching either way.
 
 ## CI (Forgejo Actions)
 
-`.forgejo/workflows/build.yml` builds and pushes the image to
-`ctr.int.example.com:8443/aether/aether` (the `aether` project in
-Harbor, repository also named `aether` — deliberately not `aether-web` or
-`aether-app`, since there's only one image this whole project produces) on
-every push to `main`, on version tags (`v*`), or via manual dispatch.
+`.forgejo/workflows/build.yml` builds and pushes a multi-arch (amd64+arm64)
+image to `ctr.int.example.com:8443/aether/aether` (the `aether` project
+in Harbor, repository also named `aether` — deliberately not `aether-web`
+or `aether-app`, since there's only one image this whole project produces)
+on every push to `main`, on version tags (`v*`), or via manual dispatch.
+
+Unlike the public release pipeline (`.github/workflows/release.yml`),
+which uses two native GitHub-hosted runners — one per arch — specifically
+because emulated Rust compilation is slow enough to make a release
+frustrating, this runner is a single amd64 host: arm64 is QEMU-emulated
+(`docker buildx build --platform linux/amd64,linux/arm64 --push`, after
+registering binfmt handlers via `tonistiigi/binfmt`). That's the right
+tradeoff here specifically because this pipeline isn't on a release
+deadline the way a tagged public release is — it runs on every push to
+`main`, so simplicity (one runner, one build invocation, one pushed
+manifest list, no digest-then-merge dance across jobs) wins over speed.
 
 Every build gets tagged with three things: the short git SHA (immutable,
 never overwritten — this is what actually gets deployed, see below),
@@ -755,6 +773,14 @@ the runner machine itself needs, directly on its `PATH`:
   daemon specifically — not just the runner.
 - **git** (for `actions/checkout`) and **Node.js 20+** (`actions/checkout@v4`
   is itself a Node.js action, regardless of host vs. container execution).
+- **`docker buildx`** (bundled with any reasonably current Docker install)
+  and the ability to run a `--privileged` container, which the "Set up
+  QEMU + buildx" step needs once per host to register binfmt handlers via
+  `tonistiigi/binfmt` — this is what lets the same amd64 box emit an arm64
+  image. The buildx builder it creates (`aether-builder`) is left in place
+  between runs rather than torn down, same reasoning as the `check` job's
+  named cargo volumes: host-mode state persists, so there's no reason to
+  pay setup cost again every run.
 
 ## Deploying to Kubernetes
 
