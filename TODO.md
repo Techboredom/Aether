@@ -1,0 +1,5 @@
+- **No Deployment lifecycle management** — Launch-only; nothing in the UI to delete/scale/edit a running deployment afterward
+- **Single-namespace only**
+- **Semantic Versioning**
+- **User Resource Quotas**
+- **User Resource Quota Visibility**

@@ -69,11 +69,6 @@ Any logged-in user (either role) can change their own password via
 - **Frontend**: Rust, [Leptos](https://leptos.dev) (client-side, compiled to
   WASM with [Trunk](https://trunkrs.dev)). Loads the initial pod snapshot over
   REST, then stays in sync over the WebSocket.
-- **Repo**: `ssh://git@git.example.com:2022/Aether/Aether-Web.git`
-  (app code — this repo). Kubernetes manifests and the Argo CD `Application`
-  live in a separate
-  [**Aether-Deploy**](https://git.example.com/Aether/Aether-Deploy)
-  repo — see "GitOps deploy (Argo CD)" below for why.
 
 ## Quick start
 
@@ -698,13 +693,7 @@ containing just the compiled backend binary and the built frontend assets —
 no shell, runs as a non-root user. It's multi-arch itself, so this
 Dockerfile needs no per-arch branching either way.
 
-## CI (Forgejo Actions)
-
-`.forgejo/workflows/build.yml` builds and pushes a multi-arch (amd64+arm64)
-image to `ctr.int.example.com:8443/aether/aether` (the `aether` project
-in Harbor, repository also named `aether` — deliberately not `aether-web`
-or `aether-app`, since there's only one image this whole project produces)
-on every push to `main`, on version tags (`v*`), or via manual dispatch.
+## CI (Github Actions)
 
 Unlike the public release pipeline (`.github/workflows/release.yml`),
 which uses two native GitHub-hosted runners — one per arch — specifically
@@ -764,13 +753,6 @@ injects a glibc-linked Node build to execute JS-based actions like
 `actions/checkout@v4`, which won't run on musl-based Alpine). In host mode,
 the runner machine itself needs, directly on its `PATH`:
 
-- **Docker**, obviously, plus TLS trust for the Harbor registry — Docker's
-  daemon has its own registry-TLS trust store, completely separate from the
-  system CA bundle, so a cert trusted system-wide (`update-ca-trust`/`trust
-  anchor`) still won't let `docker login`/`push` succeed. Drop the CA cert
-  at `/etc/docker/certs.d/ctr.int.example.com:8443/ca.crt` (directory
-  name must exactly match the registry host:port) and restart the Docker
-  daemon specifically — not just the runner.
 - **git** (for `actions/checkout`) and **Node.js 20+** (`actions/checkout@v4`
   is itself a Node.js action, regardless of host vs. container execution).
 - **`docker buildx`** (bundled with any reasonably current Docker install)
@@ -792,24 +774,6 @@ below — same RBAC verb list, same container `securityContext`, same
 probe split — with this cluster's specific values (its domain, its
 registry, its node labels) replaced by chart values that default to
 something that works on any cluster.
-
-This cluster's own deployment is what actually *runs* that chart: the
-separate [**Aether-Deploy**](https://git.example.com/Aether/Aether-Deploy)
-repo holds this cluster's `values.yaml` plus the Argo CD `Application`
-pointed at the published chart — not hand-maintained manifests anymore
-(see "GitOps deploy" below for why it's a separate repo at all). One thing
-still needs creating by hand directly in the cluster's `aether` namespace
-regardless, since it's a credential rather than a manifest and shouldn't
-live in either git repo:
-
-- **Image pull secret** — the registry requires auth:
-
-  ```
-  kubectl create secret docker-registry regcred \
-    --docker-server=ctr.int.example.com:8443 \
-    --docker-username=<user> --docker-password=<password> \
-    -n aether
-  ```
 
 Postgres doesn't need a manual secret — it runs in-cluster via
 CloudNativePG (`postgres/postgres-cluster.yaml` in Aether-Deploy, kept
@@ -848,90 +812,6 @@ repo's actual source code. If you're rebuilding this setup elsewhere, "one
 repo for app code + the chart that installs it, one for a specific
 cluster's values + the Argo CD `Application`" is the pattern to follow
 from the start rather than splitting later.
-
-**One-time bootstrap** (already done for this cluster; recorded here for
-rebuilding it elsewhere):
-
-1. Install Argo CD into its own `argocd` namespace using the standard
-   (non-HA) install manifests, then expose its UI the same way everything
-   else in this cluster is exposed — a `LoadBalancer` Service, since there's
-   no ingress controller:
-   ```
-   kubectl create namespace argocd
-   kubectl apply -n argocd --server-side --force-conflicts \
-     -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-   kubectl patch svc argocd-server -n argocd -p '{"spec": {"type": "LoadBalancer"}}'
-   ```
-   (`--server-side` matters here — plain `kubectl apply` fails on the
-   `applicationsets.argoproj.io` CRD with "annotations: Too long", since
-   client-side apply stuffs the whole manifest into a
-   `last-applied-configuration` annotation and this one's big enough to
-   exceed the 256KiB etcd field limit.) The initial admin password is
-   auto-generated: `kubectl -n argocd get secret
-   argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d`
-   — log in and change it.
-2. Trust this Forgejo host's SSH key (Argo CD ships known-hosts entries for
-   GitHub/GitLab/Bitbucket, not arbitrary self-hosted instances):
-   ```
-   ssh-keyscan -p 2022 git.example.com
-   ```
-   merged into the `argocd-ssh-known-hosts-cm` ConfigMap's
-   `ssh_known_hosts` key (then `kubectl rollout restart
-   deployment/argocd-repo-server -n argocd` to pick it up). Generate a
-   dedicated keypair for Aether-Deploy specifically (`ssh-keygen -t
-   ed25519`) — don't reuse a personal key, and don't reuse the same key
-   across repos if this pattern grows to more apps, since scoping each
-   credential to exactly the repo it needs was the whole point of this
-   split. Add the *public* half as a read-only Deploy Key on the
-   **Aether-Deploy** repo, and store the private half as a repository
-   credential Argo CD reads directly:
-   ```
-   kubectl create secret generic aether-deploy-repo-creds -n argocd \
-     --from-literal=type=git \
-     --from-literal=url=ssh://git@git.example.com:2022/Aether/Aether-Deploy.git \
-     --from-file=sshPrivateKey=<path to private key>
-   kubectl label secret aether-deploy-repo-creds -n argocd argocd.argoproj.io/secret-type=repository
-   ```
-   Never commit the private key — it only ever exists as this in-cluster
-   Secret and a local temp file deleted right after.
-3. Apply the `Application` (lives in Aether-Deploy's repo root as
-   `application.yaml`, not in this repo at all):
-   ```
-   kubectl apply -f application.yaml
-   ```
-   It uses Argo CD's multi-source support: one source is the chart itself
-   (`oci://ghcr.io/techboredom/charts`, `chart: aether`), a second is
-   Aether-Deploy's own `main` referenced via `ref: values` so the first
-   source's `helm.valueFiles: [$values/values.yaml]` can point into it,
-   and a third is Aether-Deploy's `postgres/` path for the CloudNativePG
-   `Cluster` (kept out of the chart entirely — deliberately scoped to that
-   one subdirectory so this source never tries to "manage"
-   `application.yaml`/`values.yaml` themselves as if they were resources
-   to apply). Destination namespace `aether`, with `syncPolicy.automated:
-   {prune: true, selfHeal: true}` and `CreateNamespace=true` — fully
-   automatic from here on, no manual sync button needed.
-
-**Steady-state loop** (this is the actual "build → deploy" pipeline): push
-to this repo's `main` → CI builds and pushes
-`ctr.int.example.com:8443/aether/aether:<sha>` → CI clones Aether-Deploy,
-`sed`-bumps its `values.yaml`'s `image.tag` to the new SHA, and pushes that
-commit to Aether-Deploy's `main` → Argo CD's `Application` controller
-notices the new commit there (polls every few minutes by default, or
-near-instantly with a Forgejo webhook configured later) and re-syncs,
-which rolls the `aether` Deployment to the new image. A **separate,
-deliberately manual** step is bumping the chart version itself
-(`application.yaml`'s first source's `targetRevision`) whenever
-`charts/aether/` changes in a way worth this cluster picking up — that
-doesn't happen on every commit here, only on a chart release. Check
-`kubectl get application aether -n argocd` for `Synced`/`Healthy` status, or
-the Argo CD UI.
-
-**Known limitation, same tradeoff every Argo CD install faces**: the
-standard install grants `argocd-application-controller` a cluster-scoped
-`ClusterRole` (it's built to manage any namespace), even though this
-particular `Application` only ever targets `aether`. Fine for now; a
-namespace-restricted install is a reasonable hardening step if Argo CD
-starts managing more than this one app.
 
 ## Security notes
 
