@@ -1,0 +1,163 @@
+# aether
+
+A web app for managing compute environments and AI engines on a single
+Kubernetes namespace — launch JupyterLab/RStudio environments or LLM
+inference engines (Ollama, vLLM, SGLang) with a few clicks, behind a login.
+
+## Prerequisites
+
+- Kubernetes 1.27+.
+- An ingress controller (this chart renders a plain `networking.k8s.io/v1`
+  `Ingress` — Traefik, ingress-nginx's successor, or anything else that
+  honors `ingressClassName` and forwards the `Host` header unmodified;
+  the backend dispatches on it, see `proxy::dispatch_by_host`).
+- Wildcard DNS for `*.<proxy.baseDomain>` pointed at that ingress
+  controller, unless you set `proxy.separateOrigins=false` (not
+  recommended — see below).
+- [cert-manager](https://cert-manager.io) if you leave `ingress.tls.mode`
+  at its default of `certManager`, with an `Issuer`/`ClusterIssuer` that
+  can solve a **DNS-01** challenge. This is not optional if
+  `proxy.separateOrigins` is true: HTTP-01 cannot issue a certificate for
+  a wildcard name (`*.<proxy.baseDomain>`), and that will be the first
+  thing a public-internet install hits.
+- A Postgres database Aether can run its own migrations against
+  (`database.existingSecret`), or the
+  [CloudNativePG](https://cloudnative-pg.io) operator installed if you'd
+  rather use `database.deploy.enabled=true` for evaluation.
+
+## Quick start
+
+```console
+helm install aether oci://ghcr.io/techboredom/charts/aether \
+  --namespace aether --create-namespace \
+  --set host=aether.example.com \
+  --set database.existingSecret=aether-db-app \
+  --set ingress.tls.issuerRef.name=letsencrypt \
+  --set adminBootstrap.password=<a-temporary-password>
+```
+
+This is the minimum that renders: a hostname, a database, and something to
+issue a certificate. Everything else has a working default. See
+`values.yaml` for the full set, and the table below for what each one
+does.
+
+## Evaluating without your own Postgres or cert-manager
+
+```console
+helm install aether oci://ghcr.io/techboredom/charts/aether \
+  --namespace aether --create-namespace \
+  --set host=aether.example.test \
+  --set database.deploy.enabled=true \
+  --set ingress.tls.enabled=false \
+  --set adminBootstrap.password=<a-temporary-password>
+```
+
+`database.deploy.enabled=true` is an evaluation-only, single-replica,
+no-backups Postgres — don't point it at anything you'd be upset to lose.
+`ingress.tls.enabled=false` serves plain HTTP; the app logs a warning at
+startup that session cookies can't be marked `Secure` as a result.
+
+## A worked cert-manager + Let's Encrypt example
+
+Aether's wildcard proxy origin (`*.<proxy.baseDomain>`) means Let's
+Encrypt's HTTP-01 challenge won't work — you need a DNS-01 solver, which
+means a `ClusterIssuer` configured for your DNS provider's API. For
+example, with Cloudflare:
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: you@example.com
+    privateKeySecretRef:
+      name: letsencrypt-account-key
+    solvers:
+      - dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: cloudflare-api-token
+              key: api-token
+```
+
+Then point the chart at it:
+
+```console
+--set ingress.tls.issuerRef.name=letsencrypt --set ingress.tls.issuerRef.kind=ClusterIssuer
+```
+
+cert-manager's own docs cover the full list of supported DNS-01 solvers
+and their required credentials.
+
+## Values
+
+| Key | Default | Description |
+|---|---|---|
+| `image.repository` | `ghcr.io/techboredom/aether` | Container image repository. |
+| `image.tag` | `""` | Image tag; defaults to `.Chart.AppVersion`. |
+| `image.pullPolicy` | `IfNotPresent` | |
+| `image.pullSecrets` | `[]` | Names of existing image-pull Secrets. |
+| `host` | `""` | **Required.** Public hostname Aether is served from. |
+| `proxy.baseDomain` | `""` | Base domain for per-deployment proxy origins; defaults to `proxy.<host>`. |
+| `proxy.separateOrigins` | `true` | Serve each proxied deployment from its own origin. Recommended; see below before turning off. |
+| `proxy.allowSameOriginProxy` | `false` | Must be `true` to set `proxy.separateOrigins=false`. |
+| `ingress.enabled` | `true` | |
+| `ingress.className` | `""` | |
+| `ingress.annotations` | `{}` | |
+| `ingress.tls.enabled` | `true` | |
+| `ingress.tls.mode` | `certManager` | `certManager`, `existingSecret`, or `none`. |
+| `ingress.tls.secretName` | `aether-tls` | |
+| `ingress.tls.issuerRef.name` | `""` | **Required when `mode=certManager`.** |
+| `ingress.tls.issuerRef.kind` | `ClusterIssuer` | |
+| `database.existingSecret` | `""` | Secret holding a Postgres connection string. Either this or `database.deploy.enabled` is required. |
+| `database.existingSecretKey` | `uri` | Key within `existingSecret`. |
+| `database.deploy.enabled` | `false` | Evaluation-only bundled CloudNativePG Postgres. Not for production data. |
+| `database.deploy.storage.size` | `5Gi` | |
+| `database.deploy.storage.className` | `""` | Empty uses the cluster's default StorageClass. |
+| `adminBootstrap.existingSecret` | `""` | Existing Secret (key `password`) for the first-boot admin account. |
+| `adminBootstrap.password` | `""` | Convenience alternative to `existingSecret`; ends up in Helm release history. |
+| `nodeSelector` | `{}` | |
+| `tolerations` | `[]` | |
+| `affinity` | `{}` | |
+| `serviceAccount.create` | `true` | |
+| `serviceAccount.name` | `""` | |
+| `serviceAccount.annotations` | `{}` | |
+| `rbac.create` | `true` | Namespace-scoped `Role`+`RoleBinding` only, never a `ClusterRole`. |
+| `service.type` | `ClusterIP` | |
+| `service.port` | `3000` | |
+| `resources` | `{requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: 200m, memory: 128Mi}}` | |
+| `extraEnv` | `[]` | Extra container env vars, e.g. `[{name: RUST_LOG, value: debug}]`. |
+
+## Guards
+
+This chart refuses to render (via a `fail` in `templates/_helpers.tpl`)
+rather than produce a broken or quietly-insecure install:
+
+- `host` unset.
+- `proxy.separateOrigins=false` without `proxy.allowSameOriginProxy=true`.
+- No database configured (`database.existingSecret` unset and
+  `database.deploy.enabled=false`).
+- `ingress.tls.mode=certManager` with no `ingress.tls.issuerRef.name`.
+- `proxy.baseDomain` set to more than one label deeper than `host` when
+  using `separateOrigins` + cert-manager TLS — a wildcard certificate only
+  ever covers one label, matching `ProxyOrigin::deployment_for_host` in
+  the backend.
+
+## Verifying an install
+
+```console
+helm test aether -n aether
+```
+
+Curls `/readyz` (unauthenticated, checks Postgres connectivity) through
+the Service — this doesn't require knowing anything about how to log in.
+
+## Upgrading
+
+`helm upgrade` as usual. Nothing here runs its own migrations job — the
+app runs `sqlx::migrate!()` against the database on every startup, so a
+new image version migrates the schema itself the moment its first replica
+comes up.

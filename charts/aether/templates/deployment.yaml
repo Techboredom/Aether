@@ -1,0 +1,125 @@
+{{- $_ := include "aether.validate" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aether.fullname" . }}
+  labels:
+    {{- include "aether.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "aether.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "aether.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "aether.serviceAccountName" . }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- range . }}
+        - name: {{ . }}
+        {{- end }}
+      {{- end }}
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: aether
+          image: {{ include "aether.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            # Always watches whichever namespace it's deployed into.
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.database.deploy.enabled }}
+                  name: {{ include "aether.dbSecretName" . }}
+                  key: uri
+                  {{- else }}
+                  name: {{ .Values.database.existingSecret }}
+                  key: {{ .Values.database.existingSecretKey }}
+                  {{- end }}
+            # The public origin this app is served from. Its scheme is what
+            # allows session cookies to be marked Secure, so this must match
+            # what users actually type — including https.
+            - name: APP_ORIGIN
+              value: {{ include "aether.appOrigin" . | quote }}
+            {{- if .Values.proxy.separateOrigins }}
+            # Serves each proxied deployment from its own origin,
+            # <name>.<baseDomain>, instead of from a path on this app's
+            # origin. That separation is what stops a proxied app's
+            # JavaScript from calling this app's API as whoever is browsing
+            # it. Needs the wildcard DNS record (and, with cert-manager
+            # TLS, the matching wildcard certificate).
+            - name: PROXY_BASE_DOMAIN
+              value: {{ include "aether.proxyBaseDomain" . | quote }}
+            {{- end }}
+            # Creates the initial `admin` account if the users table is
+            # empty, and is ignored once any user exists. `optional: true`
+            # means the pod starts fine whether or not the secret is there,
+            # so it can be created for the first boot and deleted afterwards
+            # without ever editing this chart's values.
+            {{- if or .Values.adminBootstrap.existingSecret .Values.adminBootstrap.password }}
+            - name: ADMIN_BOOTSTRAP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (include "aether.adminBootstrapSecretName" .) .Values.adminBootstrap.existingSecret }}
+                  key: password
+                  optional: true
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          # /api/pods used to back both probes, but it requires a session and
+          # so answers the kubelet with 401 — which Kubernetes counts as a
+          # failure, since only 200-399 pass. Readiness would never have
+          # succeeded and liveness would have restarted the container on a
+          # loop. Both endpoints below are deliberately unauthenticated.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+            # The app bounds its own database check at 2s and answers 503;
+            # give it room to say so rather than having the probe time out
+            # first, so the reason lands in its logs too.
+            timeoutSeconds: 3
+          livenessProbe:
+            # Deliberately /healthz, not /readyz: this must not depend on
+            # Postgres, or a database blip would restart a healthy app.
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

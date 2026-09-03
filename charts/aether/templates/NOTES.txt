@@ -1,0 +1,71 @@
+Aether is being installed.
+
+App URL:      {{ include "aether.appOrigin" . }}
+{{- if .Values.proxy.separateOrigins }}
+Proxy origin: *.{{ include "aether.proxyBaseDomain" . }}  (one hostname per launched app)
+{{- else }}
+
+proxy.separateOrigins is false: launched apps are proxied at
+/proxy/<name>/ on the app's own origin above, which lets a proxied app's
+JavaScript call Aether's API as whoever is browsing it. Fine for local
+development; not recommended otherwise.
+{{- end }}
+
+DNS records required, both pointed at your ingress controller's address:
+  {{ .Values.host }}                              (the app itself)
+{{- if .Values.proxy.separateOrigins }}
+  *.{{ include "aether.proxyBaseDomain" . }}       (wildcard, one per launched app)
+{{- end }}
+
+{{- if and .Values.ingress.enabled .Values.ingress.tls.enabled (eq .Values.ingress.tls.mode "certManager") }}
+
+TLS: a cert-manager Certificate ({{ .Values.ingress.tls.secretName }}) has been requested from
+issuer "{{ .Values.ingress.tls.issuerRef.name }}" ({{ .Values.ingress.tls.issuerRef.kind }}).
+{{- if .Values.proxy.separateOrigins }}
+Its wildcard name covers "*.{{ include "aether.proxyBaseDomain" . }}", which
+requires your issuer to be able to solve a DNS-01 challenge — HTTP-01
+cannot issue a wildcard certificate.
+{{- end }}
+{{- else if and .Values.ingress.enabled .Values.ingress.tls.enabled }}
+TLS: using the existing Secret "{{ .Values.ingress.tls.secretName }}" as-is — make sure it
+already exists in this namespace and covers the hostnames above.
+{{- else }}
+TLS is disabled for this release (ingress.tls.enabled=false). Session
+cookies cannot be marked Secure, and the app logs a warning at startup
+saying so.
+{{- end }}
+
+{{- if .Values.database.deploy.enabled }}
+
+Database: a single-replica, no-backups CloudNativePG Postgres was deployed
+for evaluation (database.deploy.enabled=true). Do not rely on this for
+anything you'd be upset to lose.
+{{- end }}
+
+{{- if and .Values.adminBootstrap.password (not .Values.adminBootstrap.existingSecret) }}
+
+Admin bootstrap password: set via adminBootstrap.password. This creates the
+initial "admin" account the first time the app starts against an empty
+database, and is ignored from then on. Once you've logged in and created
+real accounts, delete the bootstrap Secret so the password doesn't linger:
+
+  kubectl delete secret {{ include "aether.adminBootstrapSecretName" . }} -n {{ .Release.Namespace }}
+
+(The app reads this Secret with `optional: true`, so deleting it is always
+safe — it never causes the pod to fail to start.)
+{{- else if .Values.adminBootstrap.existingSecret }}
+
+Admin bootstrap password: reading from your existing Secret
+"{{ .Values.adminBootstrap.existingSecret }}" (key: password). Same
+optional/one-time behavior as above — delete it once you've logged in and
+created real accounts.
+{{- else }}
+
+No admin bootstrap password was configured. If the users table is empty
+(a brand-new database), there is no way to log in until one is set — see
+adminBootstrap.password / adminBootstrap.existingSecret.
+{{- end }}
+
+Verify the install:
+
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}

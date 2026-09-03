@@ -1,0 +1,18 @@
+apiVersion: v2
+name: aether
+description: >-
+  A web app for managing compute environments and AI engines on a single
+  Kubernetes namespace — launch JupyterLab/RStudio environments or LLM
+  inference engines (Ollama, vLLM, SGLang) with a few clicks, behind a login.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - kubernetes
+  - dashboard
+  - jupyterlab
+  - llm
+  - self-hosted
+maintainers:
+  - name: Cody B Johnson
+    email: johnscod@gmail.com

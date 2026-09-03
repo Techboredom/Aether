@@ -1,0 +1,56 @@
+{{- if .Values.ingress.enabled -}}
+{{- $fullName := include "aether.fullname" . -}}
+{{- $hosts := list .Values.host -}}
+{{- if .Values.proxy.separateOrigins -}}
+{{- $hosts = append $hosts (printf "*.%s" (include "aether.proxyBaseDomain" .)) -}}
+{{- end -}}
+# Routes every one of Aether's hostnames to the one Service. Whatever
+# terminates TLS here must pass the original `Host` header through
+# untouched — the backend dispatches on it to decide whether a request is
+# for the app itself or for one deployment's proxy origin (see
+# proxy::dispatch_by_host).
+#
+# The wildcard rule (when proxy.separateOrigins is true) is what makes
+# per-deployment origins work without an Ingress change per deployment —
+# every "<name>.<baseDomain>" matches this same rule, and the backend maps
+# the name to a deployment.
+#
+# No path rules: everything on any of these hosts goes to the same
+# Service, because the backend decides what a request means from its
+# Host, not its path.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}
+  labels:
+    {{- include "aether.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        {{- range $hosts }}
+        - {{ . | quote }}
+        {{- end }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    {{- range $hosts }}
+    - host: {{ . | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $fullName }}
+                port:
+                  name: http
+    {{- end }}
+{{- end }}
