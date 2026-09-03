@@ -693,77 +693,6 @@ containing just the compiled backend binary and the built frontend assets —
 no shell, runs as a non-root user. It's multi-arch itself, so this
 Dockerfile needs no per-arch branching either way.
 
-## CI (Github Actions)
-
-Unlike the public release pipeline (`.github/workflows/release.yml`),
-which uses two native GitHub-hosted runners — one per arch — specifically
-because emulated Rust compilation is slow enough to make a release
-frustrating, this runner is a single amd64 host: arm64 is QEMU-emulated
-(`docker buildx build --platform linux/amd64,linux/arm64 --push`, after
-registering binfmt handlers via `tonistiigi/binfmt`). That's the right
-tradeoff here specifically because this pipeline isn't on a release
-deadline the way a tagged public release is — it runs on every push to
-`main`, so simplicity (one runner, one build invocation, one pushed
-manifest list, no digest-then-merge dance across jobs) wins over speed.
-
-Every build gets tagged with three things: the short git SHA (immutable,
-never overwritten — this is what actually gets deployed, see below),
-`v<run number>` (Forgejo's own ever-increasing per-workflow counter, e.g.
-`v42` — a free, zero-effort human-readable version bumped on every single
-run, including a `workflow_dispatch` re-run of the same commit), and
-`latest` (which does move, by definition — nothing pulls it for anything
-that matters, since the deploy path always pins to the SHA tag). Pushing a
-`vX.Y.Z` git tag additionally tags that specific build with the exact
-version string (e.g. `v1.4.0`), for deliberate, human-chosen releases —
-alongside the other three tags, not instead of them.
-
-After a successful push, the same job also bumps the deploy: it clones the
-separate **Aether-Deploy** repo (see "GitOps deploy" below — that's where
-this cluster's values for the Helm chart in `charts/aether/` actually
-live, not here), `sed`-edits the `tag:` line in its `values.yaml` to the
-new SHA, and — if that actually changed anything — commits and pushes
-that one file straight to Aether-Deploy's `main`. Argo CD is what actually
-notices that commit and rolls the cluster forward. This job never touches
-the cluster itself, or even this repo's own `main` — only the registry
-and Aether-Deploy's git history. Deploys always pin to the SHA tag
-specifically (not `v<run number>` or a release tag) — it's the one tag
-guaranteed to exist for every single build with no extra logic needed to
-pick the "right" one.
-
-Requires three repository secrets in Forgejo (Settings → Actions → Secrets):
-
-- `REGISTRY_USER` / `REGISTRY_PASSWORD` — container registry push access.
-- `AETHER_DEPLOY_TOKEN` — an access token with write access to
-  **Aether-Deploy's** contents (not this repo), used only to push the
-  image-tag-bump commit above.
-
-The runner must be registered with a `docker` label (matching `runs-on:
-docker` in the workflow) — registered from the *repo's* (or org's) Actions →
-Runners settings page specifically, not some other scope, or it won't be
-visible to this workflow at all despite showing "Idle" in its own runner
-list (Forgejo scopes runners by wherever their registration token came
-from: instance-wide, org, user, or single-repo).
-
-This workflow's `docker` label runs in **host mode**
-(`runner.labels: ["docker:host"]` in the runner's own `config.yaml` — no
-per-job container at all), a deliberate choice since this workflow only
-ever builds/pushes Docker images and doesn't need per-job isolation; it
-also sidesteps the classic Alpine-job-image problem (Forgejo's runner
-injects a glibc-linked Node build to execute JS-based actions like
-`actions/checkout@v4`, which won't run on musl-based Alpine). In host mode,
-the runner machine itself needs, directly on its `PATH`:
-
-- **git** (for `actions/checkout`) and **Node.js 20+** (`actions/checkout@v4`
-  is itself a Node.js action, regardless of host vs. container execution).
-- **`docker buildx`** (bundled with any reasonably current Docker install)
-  and the ability to run a `--privileged` container, which the "Set up
-  QEMU + buildx" step needs once per host to register binfmt handlers via
-  `tonistiigi/binfmt` — this is what lets the same amd64 box emit an arm64
-  image. The buildx builder it creates (`aether-builder`) is left in place
-  between runs rather than torn down, same reasoning as the `check` job's
-  named cargo volumes: host-mode state persists, so there's no reason to
-  pay setup cost again every run.
-
 ## Deploying to Kubernetes
 
 For anyone installing Aether on their own cluster: use the Helm chart in
@@ -788,30 +717,6 @@ to point at a different namespace — is controlled by this cluster's
 `values.yaml` in Aether-Deploy; what each value does is documented in
 `charts/aether/README.md` here.
 
-## GitOps deploy (Argo CD)
-
-Once code merges to `main` and CI pushes a new image, something still has to
-actually roll it out to the cluster. That's Argo CD's job, not CI's — CI
-never holds cluster credentials at all, only registry access and git access
-to a *deploy* repo (see "CI" above). This was a deliberate choice over
-having CI run `kubectl apply` directly: it keeps the only thing with
-cluster-write access running *inside* the cluster itself, watching for
-changes, rather than handing that power to a build runner.
-
-**This cluster's specific deploy config lives in a separate repo,
-Aether-Deploy, not here.** The installable artifact itself — the Helm
-chart — lives in *this* repo (`charts/aether/`), versioned in lockstep
-with the app; Aether-Deploy holds only this cluster's `values.yaml`, its
-CloudNativePG `Cluster`, and the Argo CD `Application` binding them to the
-chart's published OCI location. That split (rather than a `k8s/` directory
-in this repo, which is how this was originally built) is deliberate: this
-repo's history stays pure app-code commits, the bot's tag-bump commits get
-their own repo instead of polluting this one, and the CI token that pushes
-those commits only ever needs write access to Aether-Deploy — not to this
-repo's actual source code. If you're rebuilding this setup elsewhere, "one
-repo for app code + the chart that installs it, one for a specific
-cluster's values + the Argo CD `Application`" is the pattern to follow
-from the start rather than splitting later.
 
 ## Security notes
 
