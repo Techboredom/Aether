@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-02
+
+First tagged release: packaged for others to run, not just this project's
+own cluster.
+
 ### Added
 
 - Apache-2.0 `LICENSE` and `NOTICE`, `SECURITY.md`, `CONTRIBUTING.md`.
@@ -31,3 +36,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - README corrected: login rate limiting is implemented (the "known gaps"
   section still listed it as missing, contradicting the security-notes
   section describing the throttle).
+
+[Unreleased]: https://github.com/Techboredom/Aether/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Techboredom/Aether/releases/tag/v0.1.0
