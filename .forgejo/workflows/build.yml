@@ -61,7 +61,25 @@ jobs:
       - name: Log in to registry
         run: echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login "$REGISTRY" -u "${{ secrets.REGISTRY_USER }}" --password-stdin
 
-      - name: Build image
+      # This runner is a single amd64 host, unlike the public release
+      # pipeline's two native GitHub-hosted runners (one per arch) — so
+      # arm64 here is QEMU-emulated, not native. That makes the build
+      # noticeably slower (emulated Rust compilation is tens of minutes),
+      # but this pipeline isn't on any release-turnaround deadline the way
+      # a tagged public release is, so the simplicity of one runner
+      # producing both platforms outweighs the speed cost. Idempotent and
+      # left in place afterward (not torn down in cleanup) — same
+      # persist-across-runs reasoning as the `check` job's named cargo
+      # volumes: a host-mode runner's state survives between runs, so
+      # there's no reason to pay this setup cost every single time.
+      - name: Set up QEMU + buildx (multi-arch)
+        run: |
+          docker run --rm --privileged tonistiigi/binfmt --install all
+          docker buildx create --name aether-builder --driver docker-container --use 2>/dev/null \
+            || docker buildx use aether-builder
+          docker buildx inspect --bootstrap
+
+      - name: Build and push multi-arch image
         run: |
           TAG="$(git rev-parse --short HEAD)"
           # BUILD_TAG is Forgejo's own ever-increasing run counter - a
@@ -85,16 +103,10 @@ jobs:
             TAG_ARGS+=(-t "$IMAGE:$RELEASE_TAG")
           fi
 
-          docker build "${TAG_ARGS[@]}" .
-
-      - name: Push image
-        run: |
-          docker push "$IMAGE:$TAG"
-          docker push "$IMAGE:$BUILD_TAG"
-          docker push "$IMAGE:latest"
-          if [ -n "${RELEASE_TAG:-}" ]; then
-            docker push "$IMAGE:$RELEASE_TAG"
-          fi
+          # buildx pushes the manifest list directly as part of the build -
+          # there's no separate "docker push" step the way a single-arch
+          # `docker build` + `docker push` pair needs.
+          docker buildx build --platform linux/amd64,linux/arm64 "${TAG_ARGS[@]}" --push .
 
       - name: Log out
         if: always()
@@ -149,5 +161,9 @@ jobs:
         if: always()
         run: |
           rm -rf /tmp/aether-deploy
+          # The docker-container buildx driver pushes straight to the
+          # registry without loading multi-arch results into the local
+          # `docker images` store, so this is mostly a no-op now - kept as
+          # a harmless safety net in case that ever changes.
           docker image rm -f "$IMAGE:$TAG" "$IMAGE:$BUILD_TAG" "$IMAGE:latest" ${RELEASE_TAG:+"$IMAGE:$RELEASE_TAG"} 2>/dev/null || true
           docker image prune -f
