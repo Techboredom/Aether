@@ -36,9 +36,12 @@ impl ProxyOrigin {
     /// wildcard TLS cert covers exactly one label too.
     pub fn deployment_for_host(&self, host: &str) -> Option<String> {
         // Host may carry a port (`foo.example:8443`); the cert and our
-        // routing both key off the hostname alone.
-        let host = host.split(':').next().unwrap_or(host).trim_end_matches('.');
-        let name = host.strip_suffix(&self.base_domain)?.strip_suffix('.')?;
+        // routing both key off the hostname alone. Browsers already
+        // lowercase the header, but comparing case-insensitively means a
+        // non-browser client sending mixed case still matches.
+        let host = host.split(':').next().unwrap_or(host).trim_end_matches('.').to_ascii_lowercase();
+        let base_domain = self.base_domain.to_ascii_lowercase();
+        let name = host.strip_suffix(&base_domain)?.strip_suffix('.')?;
         if name.is_empty() || name.contains('.') {
             return None;
         }
@@ -308,6 +311,15 @@ mod tests {
         // different domain entirely.
         assert_eq!(o.deployment_for_host("evilproxy.aether.example.com"), None);
         assert_eq!(o.deployment_for_host("notproxy.aether.example.com"), None);
+    }
+
+    #[test]
+    fn matches_a_host_regardless_of_case() {
+        let o = origin();
+        // Browsers already lowercase the Host header, but a non-browser
+        // client sending mixed case must still match.
+        assert_eq!(o.deployment_for_host("Foo.Proxy.Aether.Example.Com"), Some("foo".to_string()));
+        assert_eq!(o.deployment_for_host("FOO.PROXY.AETHER.EXAMPLE.COM"), Some("foo".to_string()));
     }
 
     #[test]
