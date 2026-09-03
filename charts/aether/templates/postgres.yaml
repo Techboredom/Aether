@@ -1,0 +1,39 @@
+{{- if .Values.database.deploy.enabled -}}
+# Evaluation-only Postgres for Aether's own catalog/session store (image
+# and template catalogs, users/sessions, deployment_secrets), via
+# CloudNativePG. Requires the CloudNativePG operator already installed
+# cluster-wide — that's a one-time, imperative bootstrap step, not
+# something this chart manages.
+#
+# Single instance, no backup configuration: this is meant for kicking the
+# tyres, not for anything you'd be upset to lose. Point database.existingSecret
+# at a real, backed-up Postgres instead for anything that matters.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ include "aether.dbClusterName" . }}
+  labels:
+    {{- include "aether.labels" . | nindent 4 }}
+spec:
+  instances: 1
+  storage:
+    size: {{ .Values.database.deploy.storage.size }}
+    {{- with .Values.database.deploy.storage.className }}
+    # Note: CNPG's field is `storageClass`, not `storageClassName` —
+    # Kubernetes silently prunes unknown fields from custom resources, so
+    # the more Kubernetes-idiomatic-looking name would be accepted and
+    # then dropped, leaving the PVC unbound with nothing to explain why.
+    storageClass: {{ . }}
+    {{- end }}
+  bootstrap:
+    initdb:
+      database: aether
+      owner: aether
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+{{- end }}

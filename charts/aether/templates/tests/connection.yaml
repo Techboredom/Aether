@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "aether.fullname" . }}-test-connection
+  labels:
+    {{- include "aether.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+spec:
+  # No cluster credentials of its own needed — this only checks that the
+  # app answers HTTP, not that its Kubernetes RBAC is correct.
+  restartPolicy: Never
+  containers:
+    - name: readyz
+      image: curlimages/curl:latest
+      command:
+        - curl
+        - --fail
+        - --show-error
+        - --silent
+        - http://{{ include "aether.fullname" . }}:{{ .Values.service.port }}/readyz

@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "aether",
+  "type": "object",
+  "properties": {
+    "image": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string", "description": "Container image repository, e.g. ghcr.io/<owner>/aether." },
+        "tag": { "type": "string", "description": "Image tag. Defaults to .Chart.AppVersion when empty." },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] },
+        "pullSecrets": { "type": "array", "items": { "type": "string" }, "description": "Names of existing image-pull Secrets." }
+      }
+    },
+    "host": {
+      "type": "string",
+      "description": "Required. The public hostname Aether is served from, e.g. aether.example.com. The chart refuses to render without this set."
+    },
+    "proxy": {
+      "type": "object",
+      "properties": {
+        "baseDomain": {
+          "type": "string",
+          "description": "Base domain per-deployment proxy origins are served under (\"<name>.<baseDomain>\"). Defaults to \"proxy.<host>\" when empty. Needs a wildcard DNS record for \"*.<baseDomain>\"."
+        },
+        "separateOrigins": {
+          "type": "boolean",
+          "description": "Serve each proxied deployment from its own origin (recommended, default true). Setting this false is only accepted alongside allowSameOriginProxy=true."
+        },
+        "allowSameOriginProxy": {
+          "type": "boolean",
+          "description": "Explicit acknowledgment required to set proxy.separateOrigins=false, since that lets a proxied app's JavaScript call Aether's own API as whoever is browsing it."
+        }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "annotations": { "type": "object" },
+        "tls": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "mode": {
+              "type": "string",
+              "enum": ["certManager", "existingSecret", "none"],
+              "description": "certManager renders a Certificate; existingSecret uses tls.secretName as-is; none leaves TLS to something in front of this chart."
+            },
+            "secretName": { "type": "string" },
+            "issuerRef": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string", "description": "Required when tls.mode=certManager." },
+                "kind": { "type": "string", "enum": ["ClusterIssuer", "Issuer"] }
+              }
+            }
+          }
+        }
+      }
+    },
+    "database": {
+      "type": "object",
+      "properties": {
+        "existingSecret": {
+          "type": "string",
+          "description": "Name of an existing Secret holding a Postgres connection string. The supported path — either this or database.deploy.enabled must be set."
+        },
+        "existingSecretKey": { "type": "string", "description": "Key within existingSecret holding the connection URI." },
+        "deploy": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Evaluation only. Deploys a single-replica, no-backups CloudNativePG Postgres alongside Aether. Requires the CloudNativePG operator already installed on the cluster. Do not use for anything you'd be upset to lose."
+            },
+            "storage": {
+              "type": "object",
+              "properties": {
+                "size": { "type": "string" },
+                "className": { "type": "string", "description": "StorageClass name; empty uses the cluster default." }
+              }
+            }
+          }
+        }
+      }
+    },
+    "adminBootstrap": {
+      "type": "object",
+      "properties": {
+        "existingSecret": { "type": "string", "description": "Existing Secret (key: password) to use instead of adminBootstrap.password." },
+        "password": {
+          "type": "string",
+          "description": "Convenience only: creates the initial admin account on first boot against an empty database. Prefer adminBootstrap.existingSecret if this password shouldn't sit in your values file or Helm release history."
+        }
+      }
+    },
+    "nodeSelector": { "type": "object" },
+    "tolerations": { "type": "array" },
+    "affinity": { "type": "object" },
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "annotations": { "type": "object" }
+      }
+    },
+    "rbac": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean", "description": "Creates a namespace-scoped Role + RoleBinding. Never a ClusterRole." }
+      }
+    },
+    "service": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+        "port": { "type": "integer" }
+      }
+    },
+    "resources": { "type": "object" },
+    "extraEnv": { "type": "array" }
+  },
+  "required": ["host"]
+}

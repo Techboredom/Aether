@@ -1,0 +1,100 @@
+image:
+  repository: ghcr.io/techboredom/aether
+  # Defaults to .Chart.AppVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+  # Names of existing image-pull Secrets (e.g. for a private registry).
+  pullSecrets: []
+
+# The one required value — everything else below has a working default.
+# The public hostname Aether itself is served from, e.g. "aether.example.com".
+host: ""
+
+proxy:
+  # Per-deployment proxy origins are served at "<name>.<baseDomain>".
+  # Defaults to "proxy.<host>" when empty. Needs a wildcard DNS record (and,
+  # with ingress.tls.mode=certManager, a wildcard certificate) for
+  # "*.<baseDomain>".
+  baseDomain: ""
+  # Serves every proxied deployment from its own origin (recommended).
+  # Setting this to false serves proxied apps same-origin at
+  # /proxy/<name>/ instead, where their JavaScript can call Aether's own
+  # API as whoever is browsing them — the chart refuses to render unless
+  # allowSameOriginProxy is also set, so that risk can't be taken by
+  # accident.
+  separateOrigins: true
+  allowSameOriginProxy: false
+
+ingress:
+  enabled: true
+  className: ""
+  annotations: {}
+  tls:
+    enabled: true
+    # "certManager" renders a Certificate resource; "existingSecret" uses
+    # tls.secretName as-is (a Secret you manage yourself); "none" serves
+    # plain HTTP and leaves TLS termination to something in front of this
+    # chart entirely.
+    mode: certManager
+    secretName: aether-tls
+    issuerRef:
+      name: ""
+      kind: ClusterIssuer
+
+database:
+  # The supported path: point at a Secret holding a Postgres connection
+  # string. Aether runs its own migrations on startup, so nothing further
+  # needs creating in the database beyond the database/role themselves.
+  existingSecret: ""
+  existingSecretKey: uri
+  # Evaluation only: deploys a single-replica, no-backups CloudNativePG
+  # Postgres alongside Aether. Do not use this for anything you'd be upset
+  # to lose — there is no backup/restore story here at all. Requires the
+  # CloudNativePG operator already installed on the cluster.
+  deploy:
+    enabled: false
+    storage:
+      size: 5Gi
+      className: ""
+
+adminBootstrap:
+  # A Secret (key "password") to use instead of adminBootstrap.password.
+  existingSecret: ""
+  # Convenience for first boot: creates the initial "admin" account with
+  # this password if the users table is empty. Ignored once any account
+  # exists. See NOTES.txt for retrieving and clearing it after first login.
+  password: ""
+
+# Empty by default — deliberately. A cluster-specific nodeSelector (e.g.
+# a custom node label from the original deployment this chart was ported
+# from) baked in here is exactly what would leave a pod Pending with no
+# obvious cause on anyone else's cluster.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+rbac:
+  # Namespace-scoped Role + RoleBinding only — this app only ever watches
+  # and manages its own namespace, never a ClusterRole.
+  create: true
+
+service:
+  type: ClusterIP
+  port: 3000
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+# Extra environment variables appended to the container, e.g.
+# [{name: RUST_LOG, value: debug}].
+extraEnv: []
