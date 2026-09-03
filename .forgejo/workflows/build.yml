@@ -100,24 +100,15 @@ jobs:
         if: always()
         run: docker logout "$REGISTRY"
 
-      # GitOps deploy: this app's manifests + Argo CD Application live in
-      # the separate Aether-Deploy repo, not here — this job only ever
-      # touches the registry and that other repo's git history, never the
-      # cluster itself. Argo CD (running in-cluster, watching Aether-Deploy)
-      # is what actually rolls the new image out.
+      # GitOps deploy: this app's Helm chart lives in this repo
+      # (charts/aether/), but the cluster's own values (image tag
+      # included) + the Argo CD Application live in the separate
+      # Aether-Deploy repo — this job only ever touches the registry and
+      # that other repo's git history, never the cluster itself. Argo CD
+      # (running in-cluster, watching Aether-Deploy) is what actually
+      # rolls the new image out.
       - name: Bump image tag in Aether-Deploy
         run: |
-          # Forgejo injects its own GITHUB_TOKEN into every job for
-          # actions/* compatibility. install_kustomize.sh sends whatever
-          # GITHUB_TOKEN is set to api.github.com to look up the latest
-          # release; GitHub rejects our Forgejo token as "Bad credentials"
-          # and the script dies with "Invalid GITHUB_TOKEN" before
-          # kustomize is even downloaded. Unset it so the lookup goes
-          # through unauthenticated instead.
-          unset GITHUB_TOKEN
-          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
-          KUSTOMIZE="$PWD/kustomize"
-
           # Forgejo's PAT convention is token-only in the URL (no
           # username) - "user:token@" pairs get checked as real Basic
           # Auth credentials and fail with "Credentials are incorrect
@@ -129,20 +120,24 @@ jobs:
           rm -rf /tmp/aether-deploy
           git clone "https://${{ secrets.AETHER_DEPLOY_TOKEN }}@$DEPLOY_REPO" /tmp/aether-deploy
           cd /tmp/aether-deploy
-          "$KUSTOMIZE" edit set image "$IMAGE=$IMAGE:$TAG"
 
-          if git diff --quiet -- kustomization.yaml; then
-            echo "kustomization.yaml unchanged, nothing to deploy"
+          # values.yaml has exactly one `tag:` key, two spaces deep under
+          # `image:` - a plain sed edit rather than pulling in yq for a
+          # one-line change to a small, hand-maintained file.
+          sed -i -E 's/^  tag:.*/  tag: "'"$TAG"'"/' values.yaml
+
+          if git diff --quiet -- values.yaml; then
+            echo "values.yaml unchanged, nothing to deploy"
             exit 0
           fi
 
           git config user.name "aether-ci"
           git config user.email "ci@example.com"
-          git add kustomization.yaml
+          git add values.yaml
           git commit -m "deploy: bump aether image to $TAG"
           git push origin HEAD:main
           cd /
-          rm -rf /tmp/aether-deploy "$KUSTOMIZE"
+          rm -rf /tmp/aether-deploy
 
       # Host-mode runner: this machine's disk is shared across every job,
       # not thrown away like a fresh per-job container would be. Clean up
@@ -153,6 +148,6 @@ jobs:
       - name: Clean up build artifacts
         if: always()
         run: |
-          rm -rf /tmp/aether-deploy "$PWD/kustomize"
+          rm -rf /tmp/aether-deploy
           docker image rm -f "$IMAGE:$TAG" "$IMAGE:$BUILD_TAG" "$IMAGE:latest" ${RELEASE_TAG:+"$IMAGE:$RELEASE_TAG"} 2>/dev/null || true
           docker image prune -f
