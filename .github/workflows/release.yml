@@ -6,7 +6,13 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/aether
+  # Hardcoded lowercase, not `${{ github.repository_owner }}`: Docker/OCI
+  # repository names must be all-lowercase, but a GitHub org's display name
+  # isn't (this org is "Techboredom") - ghcr.io rejects the mixed-case
+  # form outright. GitHub Actions has no built-in toLower() expression, and
+  # this project only ever runs under this one owner, so hardcoding it is
+  # simpler than a shell step to lowercase it on every job that needs it.
+  IMAGE_NAME: techboredom/aether
 
 permissions:
   contents: write
@@ -131,7 +137,8 @@ jobs:
           VERSION="${{ needs.merge.outputs.version }}"
           mkdir -p /tmp/chart-out
           helm package charts/aether --version "$VERSION" --app-version "$VERSION" --destination /tmp/chart-out
-          helm push "/tmp/chart-out/aether-$VERSION.tgz" "oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts"
+          # Same lowercase-hardcoding reasoning as IMAGE_NAME above.
+          helm push "/tmp/chart-out/aether-$VERSION.tgz" "oci://${{ env.REGISTRY }}/techboredom/charts"
 
   release:
     name: Create GitHub Release
