@@ -38,7 +38,10 @@ pub fn CreateDeploymentTab() -> impl IntoView {
     let secret_env_key = RwSignal::new(None::<String>);
     let proxy_enabled = RwSignal::new(false);
     let strip_prefix = RwSignal::new(false);
-    let public_service = RwSignal::new(true);
+    // Off by default: per-deployment proxy origins are the intended access
+    // path now, and a public LoadBalancer Service is the thing most likely
+    // to sit stuck at <pending> on a cluster with no LB controller.
+    let public_service = RwSignal::new(false);
 
     let submitting = RwSignal::new(false);
     let result: RwSignal<Option<LaunchResult>> = RwSignal::new(None);
@@ -110,7 +113,7 @@ pub fn CreateDeploymentTab() -> impl IntoView {
         secret_env_key.set(None);
         proxy_enabled.set(false);
         strip_prefix.set(false);
-        public_service.set(true);
+        public_service.set(false);
     };
 
     let on_template_change = move |ev: web_sys::Event| {

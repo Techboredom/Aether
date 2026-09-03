@@ -30,7 +30,8 @@ pub fn TemplatesTab() -> impl IntoView {
     let secret_env_key = RwSignal::new(String::new());
     let proxy_enabled = RwSignal::new(false);
     let strip_prefix = RwSignal::new(false);
-    let public_service = RwSignal::new(true);
+    // Off by default; see the matching default in create_deployment_tab.rs.
+    let public_service = RwSignal::new(false);
 
     let saving = RwSignal::new(false);
     let form_result: RwSignal<Option<Result<String, String>>> = RwSignal::new(None);
@@ -65,7 +66,7 @@ pub fn TemplatesTab() -> impl IntoView {
         secret_env_key.set(String::new());
         proxy_enabled.set(false);
         strip_prefix.set(false);
-        public_service.set(true);
+        public_service.set(false);
     };
 
     let load_into_form = move |t: &TemplateEntry| {
