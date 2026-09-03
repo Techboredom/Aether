@@ -75,6 +75,47 @@ Any logged-in user (either role) can change their own password via
   [**Aether-Deploy**](https://git.example.com/Aether/Aether-Deploy)
   repo — see "GitOps deploy (Argo CD)" below for why.
 
+## Quick start
+
+Aether installs via Helm from the published chart:
+
+```console
+helm install aether oci://ghcr.io/techboredom/charts/aether \
+  --namespace aether --create-namespace \
+  --set host=aether.example.com \
+  --set database.existingSecret=aether-db-app \
+  --set ingress.tls.issuerRef.name=letsencrypt \
+  --set adminBootstrap.password=<a-temporary-password>
+```
+
+Those four `--set` flags are the ones that matter: a hostname, a database
+(or `--set database.deploy.enabled=true` for a throwaway evaluation
+Postgres — see below), a cert-manager issuer for TLS, and a first-login
+password. Everything else in the chart has a working default.
+
+Just want to see it running, with no Postgres or cert-manager on hand?
+
+```console
+helm install aether oci://ghcr.io/techboredom/charts/aether \
+  --namespace aether --create-namespace \
+  --set host=aether.example.test \
+  --set database.deploy.enabled=true \
+  --set ingress.tls.enabled=false \
+  --set adminBootstrap.password=<a-temporary-password>
+```
+
+Log in as `admin` with that password once the pod is `Ready`
+(`kubectl get pods -n aether`), then change it — see "Change password" in
+the header, both roles can. See `charts/aether/README.md` for the full
+values reference, the guards the chart enforces before it will render at
+all, and a worked cert-manager + Let's Encrypt example (its DNS-01
+requirement, specifically — the wildcard proxy origin below means HTTP-01
+can't issue a certificate for it).
+
+The rest of this README covers what the app actually does and how its
+pieces fit together, for anyone building or modifying it rather than just
+running it.
+
 ## Layout
 
 ```
@@ -671,16 +712,16 @@ alongside the other three tags, not instead of them.
 
 After a successful push, the same job also bumps the deploy: it clones the
 separate **Aether-Deploy** repo (see "GitOps deploy" below — that's where
-this app's Kubernetes manifests actually live, not here), downloads
-`kustomize`, runs `kustomize edit set image ...` there to point its
-`kustomization.yaml` at the new SHA-tagged image, and — if that actually
-changed anything — commits and pushes that one file straight to
-Aether-Deploy's `main`. Argo CD is what actually notices that commit and
-rolls the cluster forward. This job never touches the cluster itself, or
-even this repo's own `main` — only the registry and Aether-Deploy's git
-history. Deploys always pin to the SHA tag specifically (not `v<run
-number>` or a release tag) — it's the one tag guaranteed to exist for
-every single build with no extra logic needed to pick the "right" one.
+this cluster's values for the Helm chart in `charts/aether/` actually
+live, not here), `sed`-edits the `tag:` line in its `values.yaml` to the
+new SHA, and — if that actually changed anything — commits and pushes
+that one file straight to Aether-Deploy's `main`. Argo CD is what actually
+notices that commit and rolls the cluster forward. This job never touches
+the cluster itself, or even this repo's own `main` — only the registry
+and Aether-Deploy's git history. Deploys always pin to the SHA tag
+specifically (not `v<run number>` or a release tag) — it's the one tag
+guaranteed to exist for every single build with no extra logic needed to
+pick the "right" one.
 
 Requires three repository secrets in Forgejo (Settings → Actions → Secrets):
 
@@ -717,13 +758,23 @@ the runner machine itself needs, directly on its `PATH`:
 
 ## Deploying to Kubernetes
 
-Kubernetes manifests, the Argo CD `Application`, and full deploy
-instructions live in the separate
-[**Aether-Deploy**](https://git.example.com/Aether/Aether-Deploy)
-repo — not here (see "GitOps deploy" below for why). One thing still needs
-creating by hand directly in the cluster's `aether` namespace regardless,
-since it's a credential rather than a manifest and shouldn't live in either
-git repo:
+For anyone installing Aether on their own cluster: use the Helm chart in
+`charts/aether/` (published as an OCI artifact on each tagged release —
+see "Quick start" above and `charts/aether/README.md` for the full values
+reference). It's a parameterized port of exactly the manifests described
+below — same RBAC verb list, same container `securityContext`, same
+probe split — with this cluster's specific values (its domain, its
+registry, its node labels) replaced by chart values that default to
+something that works on any cluster.
+
+This cluster's own deployment is what actually *runs* that chart: the
+separate [**Aether-Deploy**](https://git.example.com/Aether/Aether-Deploy)
+repo holds this cluster's `values.yaml` plus the Argo CD `Application`
+pointed at the published chart — not hand-maintained manifests anymore
+(see "GitOps deploy" below for why it's a separate repo at all). One thing
+still needs creating by hand directly in the cluster's `aether` namespace
+regardless, since it's a credential rather than a manifest and shouldn't
+live in either git repo:
 
 - **Image pull secret** — the registry requires auth:
 
@@ -735,14 +786,17 @@ git repo:
   ```
 
 Postgres doesn't need a manual secret — it runs in-cluster via
-CloudNativePG (`postgres-cluster.yaml` in Aether-Deploy), which
-auto-generates its own connection-string secret. See Aether-Deploy's
-README, "Postgres (CloudNativePG)", for the one-time operator/StorageClass
-bootstrap that needs.
+CloudNativePG (`postgres/postgres-cluster.yaml` in Aether-Deploy, kept
+outside the chart since the chart's own bundled-Postgres option is
+evaluation-only), which auto-generates its own connection-string secret.
+See Aether-Deploy's README, "Postgres (CloudNativePG)", for the one-time
+operator/StorageClass bootstrap that needs.
 
-Everything else — the `ServiceAccount`/`Role`/`RoleBinding`, `Deployment`,
-`Service`, Postgres, and how to point at a different namespace — is
-documented in Aether-Deploy's own README.
+Everything else the chart renders — the `ServiceAccount`/`Role`/
+`RoleBinding`, `Deployment`, `Service`, `Ingress`, `Certificate`, and how
+to point at a different namespace — is controlled by this cluster's
+`values.yaml` in Aether-Deploy; what each value does is documented in
+`charts/aether/README.md` here.
 
 ## GitOps deploy (Argo CD)
 
@@ -754,15 +808,20 @@ having CI run `kubectl apply` directly: it keeps the only thing with
 cluster-write access running *inside* the cluster itself, watching for
 changes, rather than handing that power to a build runner.
 
-**This app's manifests live in a separate repo, Aether-Deploy, not here.**
-That split (rather than a `k8s/` directory in this repo, which is how this
-was originally built) is deliberate: this repo's history stays pure
-app-code commits, the bot's tag-bump commits get their own repo instead of
-polluting this one, and the CI token that pushes those commits only ever
-needs write access to Aether-Deploy — not to this repo's actual source
-code. If you're rebuilding this setup elsewhere, "one repo for app code,
-one for rendered manifests + the Argo CD `Application`" is the pattern to
-follow from the start rather than splitting later.
+**This cluster's specific deploy config lives in a separate repo,
+Aether-Deploy, not here.** The installable artifact itself — the Helm
+chart — lives in *this* repo (`charts/aether/`), versioned in lockstep
+with the app; Aether-Deploy holds only this cluster's `values.yaml`, its
+CloudNativePG `Cluster`, and the Argo CD `Application` binding them to the
+chart's published OCI location. That split (rather than a `k8s/` directory
+in this repo, which is how this was originally built) is deliberate: this
+repo's history stays pure app-code commits, the bot's tag-bump commits get
+their own repo instead of polluting this one, and the CI token that pushes
+those commits only ever needs write access to Aether-Deploy — not to this
+repo's actual source code. If you're rebuilding this setup elsewhere, "one
+repo for app code + the chart that installs it, one for a specific
+cluster's values + the Argo CD `Application`" is the pattern to follow
+from the start rather than splitting later.
 
 **One-time bootstrap** (already done for this cluster; recorded here for
 rebuilding it elsewhere):
@@ -814,19 +873,30 @@ rebuilding it elsewhere):
    ```
    kubectl apply -f application.yaml
    ```
-   It targets Aether-Deploy's repo root (`path: .`), `targetRevision:
-   main`, destination namespace `aether`, with `syncPolicy.automated:
+   It uses Argo CD's multi-source support: one source is the chart itself
+   (`oci://ghcr.io/techboredom/charts`, `chart: aether`), a second is
+   Aether-Deploy's own `main` referenced via `ref: values` so the first
+   source's `helm.valueFiles: [$values/values.yaml]` can point into it,
+   and a third is Aether-Deploy's `postgres/` path for the CloudNativePG
+   `Cluster` (kept out of the chart entirely — deliberately scoped to that
+   one subdirectory so this source never tries to "manage"
+   `application.yaml`/`values.yaml` themselves as if they were resources
+   to apply). Destination namespace `aether`, with `syncPolicy.automated:
    {prune: true, selfHeal: true}` and `CreateNamespace=true` — fully
    automatic from here on, no manual sync button needed.
 
 **Steady-state loop** (this is the actual "build → deploy" pipeline): push
 to this repo's `main` → CI builds and pushes
 `ctr.int.example.com:8443/aether/aether:<sha>` → CI clones Aether-Deploy,
-bumps its `kustomization.yaml`'s `images:` override to the new tag, and
-pushes that commit to Aether-Deploy's `main` → Argo CD's `Application`
-controller notices the new commit there (polls every few minutes by
-default, or near-instantly with a Forgejo webhook configured later) and
-re-syncs, which rolls the `aether` Deployment to the new image. Check
+`sed`-bumps its `values.yaml`'s `image.tag` to the new SHA, and pushes that
+commit to Aether-Deploy's `main` → Argo CD's `Application` controller
+notices the new commit there (polls every few minutes by default, or
+near-instantly with a Forgejo webhook configured later) and re-syncs,
+which rolls the `aether` Deployment to the new image. A **separate,
+deliberately manual** step is bumping the chart version itself
+(`application.yaml`'s first source's `targetRevision`) whenever
+`charts/aether/` changes in a way worth this cluster picking up — that
+doesn't happen on every commit here, only on a chart release. Check
 `kubectl get application aether -n argocd` for `Synced`/`Healthy` status, or
 the Argo CD UI.
 
@@ -1055,9 +1125,6 @@ save correctly. Known gaps, in case they matter for what you do next:
   email field on accounts). An admin can reset a locked-out user's password
   from the Users tab instead (see below), which covers the "I forgot it"
   case even without a self-service link.
-- **No login rate limiting.** `POST /api/login` has no lockout/backoff, so
-  nothing but password strength (≥ 8 chars, enforced at creation) stands
-  between an attacker and password guessing.
 - **Quotas aren't retroactive.** Lowering a user's limit (or the global
   default) below what they're already running doesn't touch existing
   deployments — enforcement only ever blocks a *new* launch or edit from
