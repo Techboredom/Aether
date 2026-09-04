@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   in-process version only serialized concurrent requests within a single
   replica, which would have silently under-enforced quota the moment a
   second replica (or an old+new pod overlapping mid-rollout) existed.
+- `POST /api/deployments`'s `name` is now scoped to the caller: the actual
+  Deployment/Service is named `<username>-<name>`, so a name only has to
+  be unique among what that user has launched, not everyone sharing the
+  namespace. Usernames are now validated against the same DNS-1123
+  grammar as a Kubernetes name (lowercase alphanumeric and `-` only) since
+  a username is now also part of one — tighter than the previous rule,
+  which allowed uppercase, `.`, and `_`.
 
 ## [0.1.1] - 2026-09-03
 
