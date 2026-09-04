@@ -19,25 +19,35 @@ pub struct GlobalSettings {
     pub expose_resource_requests: bool,
     pub fixed_cpu_request: Option<String>,
     pub fixed_memory_request: Option<String>,
+    pub allow_custom_images: bool,
 }
 
 impl Default for GlobalSettings {
     fn default() -> Self {
-        // Mirrors the column defaults in 0009_add_quotas.sql — in particular
-        // `expose_resource_requests` is true, so falling back here can't
-        // silently hide the request fields from everyone.
-        Self { limits: QuotaLimits::default(), expose_resource_requests: true, fixed_cpu_request: None, fixed_memory_request: None }
+        // Mirrors the column defaults in 0009_add_quotas.sql/
+        // 0013_add_image_catalog_restriction.sql — in particular
+        // `expose_resource_requests`/`allow_custom_images` are both true, so
+        // falling back here can't silently hide fields or block launches for
+        // everyone.
+        Self {
+            limits: QuotaLimits::default(),
+            expose_resource_requests: true,
+            fixed_cpu_request: None,
+            fixed_memory_request: None,
+            allow_custom_images: true,
+        }
     }
 }
 
-type GlobalSettingsRow = (Option<String>, Option<String>, Option<i32>, bool, Option<String>, Option<String>);
+type GlobalSettingsRow = (Option<String>, Option<String>, Option<i32>, bool, Option<String>, Option<String>, bool);
 
 pub async fn load_global_settings(pg: &PgPool) -> Result<GlobalSettings, ApiError> {
     // `fetch_optional`, not `fetch_one`: the singleton row is created by the
     // migration, but if it ever went missing every launch would start failing
     // with a 500 rather than falling back to "no quota configured".
     let row: Option<GlobalSettingsRow> = sqlx::query_as(
-        "SELECT cpu_limit, memory_limit, gpu_limit, expose_resource_requests, fixed_cpu_request, fixed_memory_request \
+        "SELECT cpu_limit, memory_limit, gpu_limit, expose_resource_requests, fixed_cpu_request, fixed_memory_request, \
+                allow_custom_images \
          FROM quota_settings WHERE id = 1",
     )
     .fetch_optional(pg)
@@ -51,7 +61,32 @@ pub async fn load_global_settings(pg: &PgPool) -> Result<GlobalSettings, ApiErro
         expose_resource_requests: row.3,
         fixed_cpu_request: row.4,
         fixed_memory_request: row.5,
+        allow_custom_images: row.6,
     })
+}
+
+/// Errors if `user` isn't allowed to launch `image` — only relevant when an
+/// admin has set `allow_custom_images = false`; admins are always exempt,
+/// same as quota enforcement (this exists to stop a `user` account
+/// launching arbitrary images, not to constrain someone who already has
+/// unrestricted cluster access via their own kubeconfig regardless of what
+/// Aether enforces). Only queries the catalog tables when actually needed.
+pub async fn check_image_allowed(state: &AppState, user: &CurrentUser, image: &str, global: &GlobalSettings) -> Result<(), ApiError> {
+    if user.role == Role::Admin || global.allow_custom_images {
+        return Ok(());
+    }
+    let cataloged: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM images WHERE image = $1) OR EXISTS(SELECT 1 FROM templates WHERE image = $1)")
+            .bind(image)
+            .fetch_one(&state.pg)
+            .await?;
+    if cataloged {
+        Ok(())
+    } else {
+        Err(ApiError::BadRequest(format!(
+            "\"{image}\" isn't in the image catalog or an existing template — an admin has restricted launches to cataloged images only"
+        )))
+    }
 }
 
 async fn load_user_override(pg: &PgPool, user_id: i32) -> Result<Option<QuotaLimits>, ApiError> {
@@ -229,6 +264,9 @@ pub async fn my_quota(user: CurrentUser, State(state): State<AppState>) -> Resul
     let global = load_global_settings(&state.pg).await?;
     let (limits, is_override) = effective_quota(&state, &user, &global).await?;
     let expose_resource_requests = global.expose_resource_requests;
+    // Effective, not raw: an admin is exempt from the restriction, same as
+    // they're exempt from quota limits above.
+    let allow_custom_images = user.role == Role::Admin || global.allow_custom_images;
     let used = usage_for(&state, &user.username, None).await?;
     Ok(Json(MyQuota {
         limits,
@@ -239,6 +277,7 @@ pub async fn my_quota(user: CurrentUser, State(state): State<AppState>) -> Resul
         used_cpu_millicores: used.cpu_millicores,
         used_memory_bytes: used.memory_bytes,
         used_gpu_count: used.gpu_count,
+        allow_custom_images,
     }))
 }
 
@@ -249,6 +288,7 @@ pub async fn get_settings(_admin: AdminUser, State(state): State<AppState>) -> R
         expose_resource_requests: global.expose_resource_requests,
         fixed_cpu_request: global.fixed_cpu_request,
         fixed_memory_request: global.fixed_memory_request,
+        allow_custom_images: global.allow_custom_images,
     }))
 }
 
@@ -272,7 +312,8 @@ pub async fn update_settings(
     }
     sqlx::query(
         "UPDATE quota_settings SET cpu_limit = $1, memory_limit = $2, gpu_limit = $3, \
-         expose_resource_requests = $4, fixed_cpu_request = $5, fixed_memory_request = $6 WHERE id = 1",
+         expose_resource_requests = $4, fixed_cpu_request = $5, fixed_memory_request = $6, \
+         allow_custom_images = $7 WHERE id = 1",
     )
     .bind(&req.limits.cpu_limit)
     .bind(&req.limits.memory_limit)
@@ -280,6 +321,7 @@ pub async fn update_settings(
     .bind(req.expose_resource_requests)
     .bind(&req.fixed_cpu_request)
     .bind(&req.fixed_memory_request)
+    .bind(req.allow_custom_images)
     .execute(&state.pg)
     .await?;
     Ok(Json(req))

@@ -13,7 +13,7 @@ use crate::format::{fixed_request_note, quota_summary};
 type LaunchResult = Result<(String, Option<String>), String>;
 
 #[component]
-pub fn CreateDeploymentTab() -> impl IntoView {
+pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
     let images: RwSignal<Vec<ImageEntry>> = RwSignal::new(Vec::new());
     let images_error = RwSignal::new(None::<String>);
     let templates: RwSignal<Vec<TemplateEntry>> = RwSignal::new(Vec::new());
@@ -51,6 +51,11 @@ pub fn CreateDeploymentTab() -> impl IntoView {
     // connection - matches this app's existing behavior before quotas
     // existed.
     let expose_requests = move || my_quota.get().map(|q| q.expose_resource_requests).unwrap_or(true);
+    // Same before-load-defaults-to-true reasoning as expose_requests above.
+    // Admins are always allowed regardless of the setting — checked here
+    // too (not just server-side) so the "Custom" option/free-text image
+    // editing isn't hidden from the one role it was never meant to gate.
+    let allow_custom = move || is_admin || my_quota.get().map(|q| q.allow_custom_images).unwrap_or(true);
 
     spawn_local(async move {
         if let Ok(quota) = api::get_json::<MyQuota>("/api/quota/me").await {
@@ -177,7 +182,7 @@ pub fn CreateDeploymentTab() -> impl IntoView {
                 <label>
                     "Template"
                     <select prop:value=move || selected_template_id.get() on:change=on_template_change>
-                        <option value="">"Custom"</option>
+                        {move || allow_custom().then(|| view! { <option value="">"Custom"</option> })}
                         <For each=move || templates.get() key=|t| t.id let(t)>
                             <option value=t.id.to_string()>{t.name.clone()}</option>
                         </For>
@@ -226,6 +231,7 @@ pub fn CreateDeploymentTab() -> impl IntoView {
                         maxlength="512"
                         placeholder="e.g. nginx:stable"
                         prop:value=move || image.get()
+                        prop:disabled=move || !allow_custom()
                         on:input=move |ev| image.set(event_target_value(&ev))
                     />
                     <datalist id="image-catalog">
@@ -233,6 +239,10 @@ pub fn CreateDeploymentTab() -> impl IntoView {
                             <option value=img.image.clone()>{img.name.clone()}</option>
                         </For>
                     </datalist>
+                    {move || {
+                        (!allow_custom())
+                            .then(|| view! { <div class="hint">"An admin has restricted image selection to the catalog and existing templates — pick a Template above."</div> })
+                    }}
                 </label>
 
                 <label>

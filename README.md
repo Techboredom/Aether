@@ -249,8 +249,8 @@ additionally require the `admin` role (403 otherwise).
 - `ANY /proxy/{deployment_name}`, `ANY /proxy/{deployment_name}/`, `ANY /proxy/{deployment_name}/{*rest}` — reverse-proxies into a proxy-enabled deployment's pod (`backend/src/proxy.rs`), injecting its generated credential (if any) as the appropriate auth header so there's no login prompt. The first two (bare path / trailing slash, no further segment) are what every "Open" link actually points at; the wildcard one handles everything else the app itself requests once loaded. 403 if you're not that deployment's owner (or an admin); 400 if the deployment isn't proxy-enabled; 502 if the connection to its pod fails or times out (5s). Handles WebSocket upgrades transparently (needed for JupyterLab's kernel connections). See "Ownership, auto-generated credentials, and the reverse proxy" below.
 - `GET /api/pods/{name}/logs?container=&tail_lines=&previous=` — plain-text container logs (`container` defaults to the pod's only container if it has one; `tail_lines` defaults to 500; `previous=true` gets the last terminated instance's logs, for a crashed container)
 - `GET /api/pods/{name}/events` — JSON list of Kubernetes Events involving that pod (`type_`, `reason`, `message`, `count`, `last_seen`), most recent first — note the apiserver's default Event TTL is short (commonly ~1h), so older pods often have none left
-- `GET /api/quota/me` — the caller's own effective quota (their `user_quotas` override if they have one, else the global default), current usage, and `expose_resource_requests`. Always unlimited limits for an admin (exempt from enforcement), though `expose_resource_requests` still applies to everyone. Backs the Launch tab and the Pods tab's manage panel.
-- `GET /api/quota/settings` / `PUT /api/quota/settings` *(admin for PUT; GET requires only login)* — the global default quota: `{cpu_limit, memory_limit, gpu_limit, expose_resource_requests, fixed_cpu_request, fixed_memory_request}`. The limit/request fields are quantity strings (e.g. `"4"`/`"16Gi"`) or a plain integer (`gpu_limit`) — `null`/omitted means unlimited for a limit, or "leave unset" for a fixed request. `fixed_cpu_request`/`fixed_memory_request` only take effect while `expose_resource_requests` is `false` (see "User quotas" below).
+- `GET /api/quota/me` — the caller's own effective quota (their `user_quotas` override if they have one, else the global default), current usage, `expose_resource_requests`, and `allow_custom_images`. Always unlimited limits and `allow_custom_images: true` for an admin (exempt from both enforcement mechanisms), though `expose_resource_requests` still applies to everyone. Backs the Launch tab and the Pods tab's manage panel.
+- `GET /api/quota/settings` / `PUT /api/quota/settings` *(admin for PUT; GET requires only login)* — the global default quota: `{cpu_limit, memory_limit, gpu_limit, expose_resource_requests, fixed_cpu_request, fixed_memory_request, allow_custom_images}`. The limit/request fields are quantity strings (e.g. `"4"`/`"16Gi"`) or a plain integer (`gpu_limit`) — `null`/omitted means unlimited for a limit, or "leave unset" for a fixed request. `fixed_cpu_request`/`fixed_memory_request` only take effect while `expose_resource_requests` is `false` (see "User quotas" below). `allow_custom_images` defaults to `true`; set `false` to restrict non-admin launches to an image already in the Images catalog or an existing Template's own image (see "User quotas" below).
 - `GET /api/quota/users` *(admin)* — every account's `{user_id, username, quota_override, used_cpu_millicores, used_memory_bytes, used_gpu_count}` — `quota_override` is `null` if that user has no override and is bound by the global default. Backs the Quotas admin tab's table.
 - `PUT /api/quota/users/{id}` *(admin)* — sets (or replaces) a user's quota override, same `{cpu_limit, memory_limit, gpu_limit}` shape as the global settings' limits. `DELETE /api/quota/users/{id}` *(admin)* clears it, reverting that user to the global default.
 - `GET /proxy-auth?deployment=&next=` — the app-origin half of the proxy handshake. Verifies the caller's session and that they may open `deployment`, then redirects to that deployment's own origin carrying a single-use token. 403 if you don't own it; redirects to the SPA if you aren't logged in (it's a link people follow, not an API call). Only meaningful when `PROXY_BASE_DOMAIN` is set.
@@ -547,6 +547,22 @@ Scaling or editing an existing deployment excludes *that deployment's own*
 current usage from the baseline before adding its proposed new footprint,
 so raising its own replica count or limits is judged only against what it
 would become, not double-counted against what it already is.
+
+A third global toggle, **`allow_custom_images`** (default `true`), governs
+*what* a non-admin can launch rather than how much of it. With it off, an
+image is only accepted if it already appears in the Images catalog or as
+some Template's own `image` — regardless of whether the launch went
+through the Template dropdown or the "Custom" option, and regardless of
+which specific template (if any) `template_name` named, since the check
+is really "is this image already known to Aether" rather than "does it
+match the template you picked." The Launch tab hides the "Custom" option
+and disables free-text editing of the Image field for non-admins while
+this is off; the backend enforces it either way (`POST /api/deployments`
+400s naming the image), so this is a real restriction and not just a UI
+nicety. Admins are exempt, same as quota limits — the setting exists to
+stop a `user` account launching arbitrary images, not to constrain
+someone who already has unrestricted cluster access via their own
+kubeconfig regardless of what Aether enforces.
 
 ## Per-deployment proxy origins
 

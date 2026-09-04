@@ -171,7 +171,7 @@ fn AppShell(user: UserInfo, current_user: RwSignal<Option<UserInfo>>, theme: RwS
                 <PodsTab is_admin=is_admin />
             </div>
             <div class:hidden=move || tab.get() != Tab::Launch>
-                <CreateDeploymentTab />
+                <CreateDeploymentTab is_admin=is_admin />
             </div>
             <div class:hidden=move || tab.get() != Tab::Activity>
                 <ActivityTab is_admin=is_admin />

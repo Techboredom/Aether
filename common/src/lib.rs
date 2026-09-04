@@ -409,6 +409,16 @@ pub struct QuotaSettings {
     /// match the limit.
     pub fixed_cpu_request: Option<String>,
     pub fixed_memory_request: Option<String>,
+    /// Whether a non-admin may launch an image that isn't already a row in
+    /// the Images catalog or an existing Template's own image — i.e.
+    /// whether the Launch tab's "Custom" option and free-text image editing
+    /// are available to them at all. Admins are always exempt. Defaults to
+    /// `true` (current/original behavior, matching the `quota_settings`
+    /// column default) — frontend code reading this before it's loaded
+    /// should do the same, the way `expose_resource_requests` already does,
+    /// rather than trust this struct's derived `Default` (which would give
+    /// `false`).
+    pub allow_custom_images: bool,
 }
 
 /// Returned by `GET /api/quota/me` — the caller's own effective quota,
@@ -429,6 +439,9 @@ pub struct MyQuota {
     pub used_cpu_millicores: i64,
     pub used_memory_bytes: i64,
     pub used_gpu_count: i64,
+    /// See `QuotaSettings::allow_custom_images` — always `true` for an
+    /// admin, who is exempt. Same before-load-defaults-to-true caveat.
+    pub allow_custom_images: bool,
 }
 
 /// One row of the Quotas admin tab's per-user table (`GET /api/quota/users`).
