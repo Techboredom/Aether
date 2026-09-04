@@ -413,6 +413,13 @@ pub struct UserInfo {
     /// this user launches gets a matching `nodeSelector`, pinning their
     /// workloads to nodes carrying that label. `None` means unrestricted.
     pub node_label: Option<String>,
+    /// Admin-set UID/GID, if any. When present, every Deployment this user
+    /// launches gets a matching pod `securityContext`
+    /// (`runAsUser`/`runAsGroup`/`fsGroup`), so files it creates on shared
+    /// storage are owned by this account instead of whatever the container
+    /// image defaults to. `None` means the image's own default.
+    pub uid: Option<i32>,
+    pub gid: Option<i32>,
 }
 
 /// Submitted by the Users admin tab to set or clear a user's node label.
@@ -420,6 +427,48 @@ pub struct UserInfo {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SetNodeLabelRequest {
     pub node_label: Option<String>,
+}
+
+/// Submitted by the Users admin tab to set or clear a user's UID/GID.
+/// Either left `None` clears that half back to the image's own default —
+/// they're independent, not all-or-nothing.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SetUidGidRequest {
+    pub uid: Option<i32>,
+    pub gid: Option<i32>,
+}
+
+/// Submitted by the API Tokens admin tab to mint a new token for the
+/// calling admin's own account — `name` is just a human label (e.g. "CI
+/// automation") to tell tokens apart later, since the raw value itself is
+/// never shown again after creation.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CreateApiTokenRequest {
+    pub name: String,
+}
+
+/// Returned once, by `POST /api/tokens` only — the one and only time the
+/// raw token value is ever available. Send it as `Authorization: Bearer
+/// <token>` on subsequent API calls instead of logging in for a session
+/// cookie; it authenticates as whichever account created it, with that
+/// account's own role and permissions.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApiTokenCreated {
+    pub id: i32,
+    pub name: String,
+    pub token: String,
+    pub created_at: String,
+}
+
+/// A previously-created API token, as listed by `GET /api/tokens` — never
+/// the raw value again, only enough to tell it apart and decide whether
+/// it's still in use.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ApiTokenEntry {
+    pub id: i32,
+    pub name: String,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

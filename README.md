@@ -223,19 +223,25 @@ All flags can also be set as environment variables:
 
 ### Endpoints
 
-All endpoints below except `POST /api/login` and static assets require a
-valid session cookie (401 if missing/expired); the ones marked *(admin)*
-additionally require the `admin` role (403 otherwise).
+All endpoints below except `POST /api/login` and static assets require
+either a valid session cookie (401 if missing/expired) or, if no cookie is
+present at all, an `Authorization: Bearer <token>` header naming a valid
+API token (see "Admin API tokens" below) — the ones marked *(admin)*
+additionally require the `admin` role either way (403 otherwise).
 
 - `POST /api/login` — body `{username, password}`; sets the `aether_session` cookie and returns the logged-in `UserInfo` on success, 401 on bad credentials
 - `POST /api/logout` — clears the session (both server-side and the cookie)
 - `GET /api/me` — returns the current `UserInfo` (`{id, username, role}`), or 401 if not logged in — this is what the frontend polls on load to decide whether to show the login page
 - `PUT /api/me/password` — body `{current_password, new_password}`; changes your own password, 400 if `current_password` doesn't match. Deletes every other session for your account (`DELETE FROM sessions WHERE user_id = $1 AND token != $2`) but leaves the one making this request logged in.
-- `GET /api/users` *(admin)* — list accounts (id, username, role, node_label — never password hashes)
+- `GET /api/users` *(admin)* — list accounts (id, username, role, node_label, uid, gid — never password hashes)
 - `POST /api/users` *(admin)* — create an account; body `{username, password, role}` (`role` is `"admin"` or `"user"`); username 3-32 chars, lowercase alphanumeric or `-` only (same grammar as a Kubernetes name — it becomes part of one, see `POST /api/deployments` below), password ≥ 8 chars
 - `DELETE /api/users/{id}` *(admin)* — delete an account; an admin can't delete their own account (guards against an easy self-lockout)
 - `PUT /api/users/{id}/password` *(admin)* — body `{password}`; resets another account's password without needing the old one — the admin role itself is the authorization. Deletes **all** of that account's sessions (there's no "current session" to preserve, since it isn't the admin's own).
 - `PUT /api/users/{id}/node-label` *(admin)* — body `{node_label}`, a `"key=value"` string (e.g. `"node-type=cpu"`) or `null` to clear it. Every Deployment that account launches afterward gets a matching `nodeSelector`, pinning its pods to nodes carrying that label; `null` (the default for a new account) leaves placement unrestricted. Only affects future launches — see "Per-user node placement" below.
+- `PUT /api/users/{id}/uid-gid` *(admin)* — body `{uid, gid}`, each either a positive integer or `null` to clear just that one (they're independent). Every Deployment that account launches afterward gets a matching pod `securityContext` (`runAsUser`/`runAsGroup`/`fsGroup`); `null`/`null` (the default for a new account) leaves the container image's own default untouched. `0` is rejected (that's root — assigning it here would defeat the point). Only affects future launches — see "Per-user UID/GID" below.
+- `POST /api/tokens` *(admin)* — body `{name}` (a human label, e.g. `"CI automation"`); mints a new API token authenticating as the calling admin. Response is `{id, name, token, created_at}` — `token` is the raw value, and this is the only time it's ever returned; only its SHA-256 hash is stored. See "Admin API tokens" below.
+- `GET /api/tokens` *(admin)* — lists the caller's own tokens: `{id, name, created_at, last_used_at}` — never another admin's tokens, never a raw value again.
+- `DELETE /api/tokens/{id}` *(admin)* — revokes one of the caller's own tokens, effective immediately. 400 if it doesn't exist or belongs to someone else (same error either way, so this can't be used to probe another account's token ids).
 - `GET /api/pods` — JSON snapshot of the current pods in the watched namespace, filtered by role: a `user` only gets pods whose `aether.io/owner` label matches their own username, an `admin` gets all of them (each with its `owner` field populated). Pods for templates with a `secret_env_key` also carry a `credential: {env_key, value}` looked up from `deployment_secrets`, and pods for proxy-enabled templates carry a `proxy_path: "/proxy/<name>/"`.
 - `GET /ws` — WebSocket; sends a full snapshot on connect (same per-role filtering and credential enrichment as `GET /api/pods`), then `upsert`/`delete` events as pods change, filtered the same way per-connection
 - `GET /api/images` — JSON list of catalog entries from the `images` table (id, name, image, description)
@@ -743,6 +749,72 @@ label-key/value grammar, admin-only (`PUT /api/users/{id}/node-label`),
 and otherwise invisible to the affected user — no UI surfaces it to them,
 since it's a placement decision, not something they need to act on.
 
+## Per-user UID/GID
+
+An admin can assign a **UID and/or GID** to a user's account from the Users
+tab. Every Deployment that account launches afterward runs its container
+with a matching pod `securityContext` — `runAsUser`/`runAsGroup` so the
+process itself runs as that identity, and `fsGroup` so files it creates on
+a mounted volume come out group-owned to match
+(`backend/src/deployments.rs::security_context_for`, set on the pod
+template in `create_deployment`). This is what lets different users share
+one NFS-backed `PersistentVolumeClaim` (see "vLLM/SGLang: model, context
+length, quantization, storage, and readiness" above) without every file
+ending up owned by whatever single UID the container image happens to run
+as by default — assign each account its own UID/GID (matching however
+ownership is actually set up on the export) and their pods only ever touch
+their own files.
+
+UID and GID are independent — set one without the other, or clear either
+back to `null` (the default for a new account, meaning the container
+image's own default) without touching the other. `0` is rejected
+(`validate::uid_gid`) since that's root, and assigning it here would defeat
+the entire point. Like node placement above, this is fixed at launch time
+from whatever was set *then* — not retroactive to already-running
+deployments, and not editable post-launch via `update_deployment`
+(`PUT /api/users/{id}/uid-gid`, admin-only). Also like node placement, no
+UI surfaces this to the affected user themselves; unlike node placement,
+its effects are visible to them indirectly (file ownership on anything
+they write to a shared mount), so if that ever needs to be self-service
+this would be the first thing to reconsider.
+
+## Admin API tokens
+
+Everything in this API otherwise requires a session cookie — fine for the
+browser, but it means scripting against the API (e.g. an automation that
+provisions accounts) would otherwise mean storing a real admin password
+somewhere and re-running `POST /api/login` yourself. The **API Tokens**
+admin tab instead lets an admin mint a long-lived credential for their own
+account: `POST /api/tokens` (body `{name}`, just a label to tell tokens
+apart later) returns `{id, name, token, created_at}` — `token` is the raw
+value, and it is shown exactly this once, right after creation. From then
+on, send it as `Authorization: Bearer <token>` instead of a session
+cookie; it authenticates as whichever account created it, with that
+account's own role — a token minted by an admin has admin permissions,
+same as that admin's own session would.
+
+Only the token's SHA-256 hash is ever stored (`api_tokens.token_hash`,
+`backend/src/auth.rs::hash_token`) — deliberately not the deliberately-slow
+argon2 password hashing used for login (a 48-character random token is
+already far too high-entropy to brute-force, so there's nothing to gain
+from slow hashing, only needless per-request latency); the point of
+hashing at all here is that a database dump alone should never be
+replayable as a working credential, which matters more for these than for
+`sessions.token` (stored in plaintext) since a token is explicitly meant to
+live somewhere outside a browser, indefinitely, rather than expire in 7
+days. Every token-authenticated request updates `last_used_at`
+(`GET /api/tokens`), so an admin can tell a stale token from one still
+genuinely in use before revoking it (`DELETE /api/tokens/{id}`, effective
+immediately — no grace period). An admin only ever sees and manages their
+own tokens, never another admin's.
+
+If a request carries a session cookie at all, that cookie is the only
+thing checked — a stale/expired cookie is never allowed to silently fall
+back to a bearer token also present on the same request. That's not a
+distinction real traffic should ever hit (a script authenticates with
+*either* a cookie *or* a token, never both), so there was nothing to gain
+from supporting it, only ambiguity to invite.
+
 ## Activity logging
 
 Two append-only tables back the Activity tab, kept for support/metrics
@@ -1073,7 +1145,29 @@ credential regeneration (JupyterLab launch, `JUPYTER_TOKEN`) confirmed to
 return a new value different from the one issued at launch, with `kubectl`
 confirming the live pod's env var actually held the new value and the pod
 had genuinely restarted (`creationTimestamp` of the Deployment vs.
-`restartedAt` annotation a few seconds later). Known gaps, in case they
+`restartedAt` annotation a few seconds later). Per-user UID/GID was
+verified against the real cluster the same way as node placement: `0` and
+negative values both rejected with 400 (`uid: must be a positive integer
+(0 is root)`), a valid `{uid: 1500, gid: 2000}` set on a test account
+confirmed via `kubectl` to produce a Deployment whose
+`spec.template.spec.securityContext` was exactly `{runAsUser: 1500,
+runAsGroup: 2000, fsGroup: 2000}`, and — going one level past the spec
+itself — the *running* pod's own kubelet-reported container status
+(`status.containerStatuses[0].user.linux`) confirmed `{uid: 1500, gid:
+2000}`, i.e. the container's actual process identity, not just what was
+requested. Admin API tokens were verified end-to-end: a token minted via
+`POST /api/tokens` with an admin's session cookie was confirmed, via
+`psql`, to leave only a SHA-256 hash in `api_tokens.token_hash` — never the
+raw value; that same raw value, sent as `Authorization: Bearer <token>`
+with **no cookie at all**, successfully authenticated `GET /api/me` and
+then created a real user via `POST /api/users` (the exact original use
+case); an invalid/bogus bearer token was rejected with 401; a `user`-role
+account was rejected with 403 attempting `POST /api/tokens`; `GET
+/api/tokens` was confirmed to show `last_used_at` freshly updated after
+those calls; and revoking the token (`DELETE /api/tokens/{id}`) was
+confirmed to immediately invalidate it (the same bearer token then got 401
+on its very next request), with a second revoke attempt on the same
+already-gone id cleanly 400ing instead of 500ing. Known gaps, in case they
 matter for what you do next:
 
 - **`public_service`'s default is inconsistent between the API and the UI.**
@@ -1084,6 +1178,13 @@ matter for what you do next:
   request body entirely — a script or other direct API caller that doesn't
   send `public_service` explicitly still gets the old public-by-default
   behavior. Always send it explicitly if you're calling the API directly.
+- **API tokens never expire on their own** — there's no `expires_at`, no
+  automatic rotation, and no "last used more than N days ago, auto-revoke"
+  sweep. `last_used_at` gives an admin the information needed to decide a
+  token is stale, but revoking it is always a manual, explicit action.
+  Deleting the underlying user account does cascade-delete its tokens
+  (`ON DELETE CASCADE`), so there's no way for a token to outlive the
+  account that created it, at least.
 - **Still no "forgot password" self-service flow** — that requires emailing
   a reset link, which this app has no mechanism for (no SMTP config, no
   email field on accounts). An admin can reset a locked-out user's password

@@ -1,6 +1,7 @@
 mod account;
 mod activity_tab;
 mod api;
+mod api_tokens_tab;
 mod create_deployment_tab;
 mod deployment_manage;
 mod env_editor;
@@ -18,6 +19,7 @@ mod ws;
 
 use account::ChangePasswordPanel;
 use activity_tab::ActivityTab;
+use api_tokens_tab::ApiTokensTab;
 use common::{Role, UserInfo};
 use create_deployment_tab::CreateDeploymentTab;
 use gloo_net::http::Request;
@@ -44,6 +46,7 @@ enum Tab {
     Images,
     Users,
     Quotas,
+    ApiTokens,
 }
 
 #[component]
@@ -144,6 +147,13 @@ fn AppShell(user: UserInfo, current_user: RwSignal<Option<UserInfo>>, theme: RwS
                         >
                             "Quotas"
                         </button>
+                        <button
+                            class="tab-button"
+                            class:active=move || tab.get() == Tab::ApiTokens
+                            on:click=move |_| tab.set(Tab::ApiTokens)
+                        >
+                            "API Tokens"
+                        </button>
                     </Show>
                 </nav>
                 <div class="user-info">
@@ -188,6 +198,9 @@ fn AppShell(user: UserInfo, current_user: RwSignal<Option<UserInfo>>, theme: RwS
                 </div>
                 <div class:hidden=move || tab.get() != Tab::Quotas>
                     <QuotasTab />
+                </div>
+                <div class:hidden=move || tab.get() != Tab::ApiTokens>
+                    <ApiTokensTab />
                 </div>
             </Show>
         </main>

@@ -239,6 +239,17 @@ pub fn node_label(value: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// A UID or GID for a launched pod's `securityContext`. Rejects `0` as well
+/// as negative values — `0` is root, and assigning it here would defeat the
+/// whole point (per-user file ownership on shared storage), so it's almost
+/// certainly a mistake rather than something an admin actually meant.
+pub fn uid_gid(field: &str, value: i32) -> Result<(), ApiError> {
+    if value <= 0 {
+        return Err(bad(field, "must be a positive integer (0 is root)"));
+    }
+    Ok(())
+}
+
 pub fn password(value: &str) -> Result<(), ApiError> {
     if value.len() < 8 {
         return Err(bad("password", "must be at least 8 characters"));
@@ -400,6 +411,14 @@ mod tests {
         for label in ["nodetypecpu", "node type=cpu", "=value", "-bad=cpu", "bad-=cpu", &format!("{}=x", "a".repeat(64))] {
             assert!(!is_ok(node_label(label)), "should reject {label:?}");
         }
+    }
+
+    #[test]
+    fn uid_gid_rejects_root_and_negative_but_accepts_positive() {
+        assert!(is_ok(uid_gid("uid", 1000)));
+        assert!(is_ok(uid_gid("uid", 1)));
+        assert!(!is_ok(uid_gid("uid", 0)));
+        assert!(!is_ok(uid_gid("uid", -1)));
     }
 
     #[test]
