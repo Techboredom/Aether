@@ -24,6 +24,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   server-side (`POST /api/deployments` 400s otherwise), with the Launch
   tab hiding the "Custom" option and disabling image editing to match.
   Admins are always exempt.
+- A dedicated **Model** field (Launch and Templates forms), substituted
+  for `{{model}}` in `args` — pulls the one flag every LLM-serving
+  template actually needs edited (vLLM's `--model`, SGLang's
+  `--model-path`) out of the free-text args box. Works identically for a
+  Hugging Face model ID or a local path under a storage mount (below).
+- A new `{{accelerator_count}}` args placeholder, so tensor parallelism
+  (or any other flag that should track GPU count) matches whatever was
+  actually requested instead of needing a second number kept in sync by
+  hand — defaults to `1` if no accelerator was requested. vLLM/SGLang's
+  seeded templates now use `{{model}}`/`{{accelerator_count}}` instead of
+  a hand-edited placeholder string.
+- A storage mount for launches/templates: `volume_claim_name` +
+  `volume_mount_path` (+ optional `volume_sub_path`) mount an *existing*
+  `PersistentVolumeClaim` into the container — e.g. a shared model cache,
+  so `model` can be a local path instead of re-downloading on every
+  restart. Aether never creates or deletes a PVC itself; a new
+  `GET /api/pvcs` (any logged-in user) lists what already exists in the
+  namespace to back the forms' datalist, and the claim is confirmed to
+  actually exist before the Deployment is created (400 immediately on a
+  typo, rather than a pod stuck `Pending` with an opaque mount-failure
+  event). New RBAC verbs: `persistentvolumeclaims` `get`/`list`.
 
 ### Changed
 

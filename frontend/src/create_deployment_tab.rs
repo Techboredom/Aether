@@ -1,4 +1,4 @@
-use common::{CreateDeploymentRequest, CreateDeploymentResponse, ImageEntry, MyQuota, TemplateEntry};
+use common::{CreateDeploymentRequest, CreateDeploymentResponse, ImageEntry, MyQuota, PvcEntry, TemplateEntry};
 use leptos::prelude::*;
 use leptos::tachys::dom::event_target_value;
 use leptos::task::spawn_local;
@@ -33,6 +33,11 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
     let accelerator_count = RwSignal::new(String::new());
     let env_vars = EnvVars::new();
     let args_text = RwSignal::new(String::new());
+    let model = RwSignal::new(String::new());
+    let volume_claim_name = RwSignal::new(String::new());
+    let volume_mount_path = RwSignal::new(String::new());
+    let volume_sub_path = RwSignal::new(String::new());
+    let pvcs: RwSignal<Vec<PvcEntry>> = RwSignal::new(Vec::new());
     let notes = RwSignal::new(None::<String>);
     let secret_env_key = RwSignal::new(None::<String>);
     let proxy_enabled = RwSignal::new(false);
@@ -77,6 +82,12 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
         }
     });
 
+    spawn_local(async move {
+        if let Ok(list) = api::get_json::<Vec<PvcEntry>>("/api/pvcs").await {
+            pvcs.set(list);
+        }
+    });
+
     let apply_template = move |t: &TemplateEntry| {
         selected_template_name.set(Some(t.name.clone()));
         notes.set(if t.notes.trim().is_empty() { None } else { Some(t.notes.clone()) });
@@ -93,6 +104,10 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
             t.env.iter().filter(|(k, _)| Some(k) != t.secret_env_key.as_ref()).cloned().collect();
         env_vars.set_from(&env);
         args_text.set(t.args.join("\n"));
+        model.set(t.model.clone());
+        volume_claim_name.set(t.volume_claim_name.clone());
+        volume_mount_path.set(t.volume_mount_path.clone());
+        volume_sub_path.set(t.volume_sub_path.clone());
         secret_env_key.set(t.secret_env_key.clone());
         proxy_enabled.set(t.proxy_enabled);
         strip_prefix.set(t.strip_prefix);
@@ -112,6 +127,10 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
         accelerator_count.set(String::new());
         env_vars.set_from(&[]);
         args_text.set(String::new());
+        model.set(String::new());
+        volume_claim_name.set(String::new());
+        volume_mount_path.set(String::new());
+        volume_sub_path.set(String::new());
         secret_env_key.set(None);
         proxy_enabled.set(false);
         strip_prefix.set(false);
@@ -158,6 +177,10 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
             container_port: container_port.get().trim().parse().ok(),
             env: env_vars.to_pairs(),
             args,
+            model: non_empty(model.get()),
+            volume_claim_name: non_empty(volume_claim_name.get()),
+            volume_mount_path: non_empty(volume_mount_path.get()),
+            volume_sub_path: non_empty(volume_sub_path.get()),
             generate_secret_for: secret_env_key.get(),
             enable_proxy: proxy_enabled.get(),
             strip_prefix: strip_prefix.get(),
@@ -359,13 +382,68 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
                 </fieldset>
 
                 <label>
+                    "Model (optional)"
+                    <input
+                        type="text"
+                        maxlength="500"
+                        placeholder="e.g. meta-llama/Llama-3-8B, or a local path under the mount below"
+                        prop:value=move || model.get()
+                        on:input=move |ev| model.set(event_target_value(&ev))
+                    />
+                </label>
+
+                <fieldset>
+                    <legend>"Storage mount (optional)"</legend>
+                    <label>
+                        "Existing PersistentVolumeClaim"
+                        <input
+                            type="text"
+                            list="pvc-catalog"
+                            maxlength="63"
+                            placeholder="e.g. ollama-models"
+                            prop:value=move || volume_claim_name.get()
+                            on:input=move |ev| volume_claim_name.set(event_target_value(&ev))
+                        />
+                        <datalist id="pvc-catalog">
+                            <For each=move || pvcs.get() key=|p| p.name.clone() let(p)>
+                                <option value=p.name.clone()>{p.capacity.clone().unwrap_or_default()}</option>
+                            </For>
+                        </datalist>
+                    </label>
+                    <label>
+                        "Mount path"
+                        <input
+                            type="text"
+                            maxlength="512"
+                            placeholder="e.g. /mnt/models"
+                            disabled=move || volume_claim_name.get().trim().is_empty()
+                            prop:value=move || volume_mount_path.get()
+                            on:input=move |ev| volume_mount_path.set(event_target_value(&ev))
+                        />
+                    </label>
+                    <label>
+                        "Subpath within the claim (optional)"
+                        <input
+                            type="text"
+                            maxlength="512"
+                            disabled=move || volume_claim_name.get().trim().is_empty()
+                            prop:value=move || volume_sub_path.get()
+                            on:input=move |ev| volume_sub_path.set(event_target_value(&ev))
+                        />
+                    </label>
+                </fieldset>
+
+                <label>
                     "Command arguments (optional, one per line)"
                     <textarea
                         rows="2"
-                        placeholder="--model=..."
+                        placeholder="--tensor-parallel-size={{accelerator_count}}"
                         prop:value=move || args_text.get()
                         on:input=move |ev| args_text.set(event_target_value(&ev))
                     ></textarea>
+                    <div class="hint">
+                        "\"{{name}}\" is this deployment's own generated name, \"{{model}}\" is the Model field above, and \"{{accelerator_count}}\" is the Accelerator count above (defaults to 1)."
+                    </div>
                 </label>
 
                 <button type="submit" disabled=move || submitting.get()>
