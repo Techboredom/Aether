@@ -1,4 +1,4 @@
-use common::{CreateUserRequest, ResetPasswordRequest, Role, SetNodeLabelRequest, UserInfo};
+use common::{CreateUserRequest, ResetPasswordRequest, Role, SetNodeLabelRequest, SetUidGidRequest, UserInfo};
 use leptos::prelude::*;
 use leptos::tachys::dom::event_target_value;
 use leptos::task::spawn_local;
@@ -27,6 +27,12 @@ pub fn UsersTab() -> impl IntoView {
     let label_value = RwSignal::new(String::new());
     let label_saving = RwSignal::new(false);
     let label_result: RwSignal<Option<Result<String, String>>> = RwSignal::new(None);
+
+    let uidgid_target: RwSignal<Option<(i32, String)>> = RwSignal::new(None);
+    let uid_value = RwSignal::new(String::new());
+    let gid_value = RwSignal::new(String::new());
+    let uidgid_saving = RwSignal::new(false);
+    let uidgid_result: RwSignal<Option<Result<String, String>>> = RwSignal::new(None);
 
     let refresh = move || {
         spawn_local(async move {
@@ -95,6 +101,7 @@ pub fn UsersTab() -> impl IntoView {
                             <th>"Username"</th>
                             <th>"Role"</th>
                             <th>"Node label"</th>
+                            <th>"UID/GID"</th>
                             <th></th>
                         </tr>
                     </thead>
@@ -104,14 +111,23 @@ pub fn UsersTab() -> impl IntoView {
                                 let id = u.id;
                                 let role_label = if u.role == Role::Admin { "admin" } else { "user" };
                                 let node_label_display = u.node_label.clone().unwrap_or_else(|| "—".to_string());
+                                let uidgid_display = format!(
+                                    "{}/{}",
+                                    u.uid.map(|v| v.to_string()).unwrap_or_else(|| "—".to_string()),
+                                    u.gid.map(|v| v.to_string()).unwrap_or_else(|| "—".to_string()),
+                                );
                                 let reset_username = u.username.clone();
                                 let label_username = u.username.clone();
+                                let uidgid_username = u.username.clone();
                                 let current_node_label = u.node_label.clone().unwrap_or_default();
+                                let current_uid = u.uid.map(|v| v.to_string()).unwrap_or_default();
+                                let current_gid = u.gid.map(|v| v.to_string()).unwrap_or_default();
                                 view! {
                                     <tr>
                                         <td>{u.username.clone()}</td>
                                         <td>{role_label}</td>
                                         <td>{node_label_display}</td>
+                                        <td>{uidgid_display}</td>
                                         <td class="table-actions">
                                             <button
                                                 type="button"
@@ -134,6 +150,18 @@ pub fn UsersTab() -> impl IntoView {
                                                 }
                                             >
                                                 "Node label"
+                                            </button>
+                                            <button
+                                                type="button"
+                                                class="icon-button"
+                                                on:click=move |_| {
+                                                    uidgid_target.set(Some((id, uidgid_username.clone())));
+                                                    uid_value.set(current_uid.clone());
+                                                    gid_value.set(current_gid.clone());
+                                                    uidgid_result.set(None);
+                                                }
+                                            >
+                                                "UID/GID"
                                             </button>
                                             <button type="button" class="icon-button" on:click=move |_| delete_user(id)>
                                                 "Delete"
@@ -255,6 +283,72 @@ pub fn UsersTab() -> impl IntoView {
             }}
             <ResultBanner result=label_result />
 
+            {move || {
+                uidgid_target
+                    .get()
+                    .map(|(id, target_username)| {
+                        let on_uidgid_submit = move |ev: web_sys::SubmitEvent| {
+                            ev.prevent_default();
+                            if uidgid_saving.get() {
+                                return;
+                            }
+                            let uid = uid_value.get();
+                            let gid = gid_value.get();
+                            uidgid_saving.set(true);
+                            uidgid_result.set(None);
+                            spawn_local(async move {
+                                let outcome = set_uid_gid(id, uid, gid).await;
+                                uidgid_saving.set(false);
+                                match outcome {
+                                    Ok(msg) => {
+                                        uidgid_result.set(Some(Ok(msg)));
+                                        uidgid_target.set(None);
+                                        refresh();
+                                    }
+                                    Err(err) => uidgid_result.set(Some(Err(err))),
+                                }
+                            });
+                        };
+                        view! {
+                            <h3 class="section-heading">{format!("UID/GID for \"{target_username}\"")}</h3>
+                            <form class="deploy-form" on:submit=on_uidgid_submit>
+                                <label>
+                                    "UID"
+                                    <input
+                                        type="number"
+                                        min="1"
+                                        placeholder="leave empty for the image's default"
+                                        prop:value=move || uid_value.get()
+                                        on:input=move |ev| uid_value.set(event_target_value(&ev))
+                                    />
+                                </label>
+                                <label>
+                                    "GID"
+                                    <input
+                                        type="number"
+                                        min="1"
+                                        placeholder="leave empty for the image's default"
+                                        prop:value=move || gid_value.get()
+                                        on:input=move |ev| gid_value.set(event_target_value(&ev))
+                                    />
+                                </label>
+                                <p class="hint">
+                                    "Every future launch from this account runs its container as this UID/GID (and mounts volumes with matching group ownership). Existing deployments aren't affected. Either field can be set on its own."
+                                </p>
+                                <div class="form-actions">
+                                    <button type="submit" disabled=move || uidgid_saving.get()>
+                                        {move || if uidgid_saving.get() { "Saving…" } else { "Save" }}
+                                    </button>
+                                    <button type="button" class="secondary-button" on:click=move |_| uidgid_target.set(None)>
+                                        "Cancel"
+                                    </button>
+                                </div>
+                            </form>
+                        }
+                    })
+            }}
+            <ResultBanner result=uidgid_result />
+
             <h3 class="section-heading">"New user"</h3>
             <form class="deploy-form" on:submit=on_submit>
                 <label>
@@ -303,6 +397,18 @@ async fn set_node_label(id: i32, value: String) -> Result<String, String> {
         .await
         .map_err(|err| format!("Failed to save node label: {err}"))?;
     Ok(if cleared { "Node label cleared.".to_string() } else { "Node label saved.".to_string() })
+}
+
+async fn set_uid_gid(id: i32, uid: String, gid: String) -> Result<String, String> {
+    let uid = uid.trim();
+    let gid = gid.trim();
+    let uid = if uid.is_empty() { None } else { Some(uid.parse().map_err(|_| "UID must be a whole number".to_string())?) };
+    let gid = if gid.is_empty() { None } else { Some(gid.parse().map_err(|_| "GID must be a whole number".to_string())?) };
+    let cleared = uid.is_none() && gid.is_none();
+    let _: UserInfo = api::put_json(&format!("/api/users/{id}/uid-gid"), &SetUidGidRequest { uid, gid })
+        .await
+        .map_err(|err| format!("Failed to save UID/GID: {err}"))?;
+    Ok(if cleared { "UID/GID cleared.".to_string() } else { "UID/GID saved.".to_string() })
 }
 
 async fn reset_password(id: i32, password: String) -> Result<String, String> {

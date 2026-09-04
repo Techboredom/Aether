@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use argon2::password_hash::{phc::PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::Argon2;
 use axum::extract::{ConnectInfo, FromRequestParts, State};
-use axum::http::header::USER_AGENT;
+use axum::http::header::{AUTHORIZATION, USER_AGENT};
 use axum::http::request::Parts;
 use axum::http::HeaderMap;
 use axum::Json;
@@ -11,6 +11,7 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use common::{ChangePasswordRequest, LoginRequest, Role, SessionLogEntry, UserInfo};
 use rand::distr::Alphanumeric;
 use rand::RngExt;
+use sha2::{Digest, Sha256};
 use sqlx::FromRow;
 use time::Duration;
 
@@ -49,6 +50,29 @@ pub fn generate_name_suffix() -> String {
     rand::rng().sample_iter(Alphanumeric).take(6).map(|b| (b as char).to_ascii_lowercase()).collect()
 }
 
+/// A high-entropy API token for admin automation (`POST /api/tokens`),
+/// prefixed so a leaked value is easy to recognize at a glance or catch
+/// with a secret scanner — the same idea as GitHub's `ghp_`/`gho_` etc.
+/// Unlike `generate_token`'s session cookies and app credentials, this is
+/// explicitly meant to be copied out of a browser once and handed to a
+/// script or CI system, so it gets a distinguishing prefix those don't need.
+pub fn generate_api_token() -> String {
+    format!("aat_{}", generate_token())
+}
+
+/// Hashes an API token for storage/lookup (`api_tokens.token_hash`) — a
+/// fast, unsalted SHA-256, not `hash_password`'s deliberately-slow argon2.
+/// Slow hashing defends against *guessing* a low-entropy secret (a human
+/// password); this token is 48 random alphanumeric characters, already
+/// far too high-entropy to brute-force, so the only job here is turning "a
+/// database dump" into "not immediately a working credential" without
+/// adding real latency to every single API-token-authenticated request.
+pub fn hash_token(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 /// The authenticated caller, extracted from the `aether_session` cookie.
 /// Any endpoint that takes this as a parameter requires a logged-in user of
 /// either role — use `AdminUser` instead for admin-only endpoints.
@@ -59,6 +83,9 @@ pub struct CurrentUser {
     pub role: Role,
     /// Admin-set "key=value" node label, if any — see `common::UserInfo::node_label`.
     pub node_label: Option<String>,
+    /// Admin-set UID/GID, if any — see `common::UserInfo::uid`/`gid`.
+    pub uid: Option<i32>,
+    pub gid: Option<i32>,
 }
 
 #[derive(FromRow)]
@@ -67,29 +94,84 @@ struct SessionUserRow {
     username: String,
     role: String,
     node_label: Option<String>,
+    uid: Option<i32>,
+    gid: Option<i32>,
 }
 
 impl FromRequestParts<AppState> for CurrentUser {
     type Rejection = ApiError;
 
+    /// Session cookie first (the browser path); if there's no cookie at all,
+    /// falls back to an `Authorization: Bearer <token>` header (the
+    /// automation path — see `tokens.rs`). A request carrying a cookie is
+    /// never allowed to also fall back to a bearer token if that cookie
+    /// turns out to be invalid/expired — that's not a scenario a real
+    /// browser or script should ever hit, so there's nothing to gain from
+    /// supporting it, only ambiguity to invite.
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
         let jar = CookieJar::from_request_parts(parts, state).await.expect("infallible");
-        let token = jar.get(SESSION_COOKIE).map(|c| c.value().to_string()).ok_or(ApiError::Unauthorized)?;
+        if let Some(token) = jar.get(SESSION_COOKIE).map(|c| c.value().to_string()) {
+            let row: Option<SessionUserRow> = sqlx::query_as(
+                "SELECT u.id, u.username, u.role, u.node_label, u.uid, u.gid FROM sessions s \
+                 JOIN users u ON u.id = s.user_id \
+                 WHERE s.token = $1 AND s.expires_at > now()",
+            )
+            .bind(&token)
+            .fetch_optional(&state.pg)
+            .await
+            .map_err(ApiError::from)?;
 
-        let row: Option<SessionUserRow> = sqlx::query_as(
-            "SELECT u.id, u.username, u.role, u.node_label FROM sessions s \
-             JOIN users u ON u.id = s.user_id \
-             WHERE s.token = $1 AND s.expires_at > now()",
-        )
-        .bind(&token)
-        .fetch_optional(&state.pg)
-        .await
-        .map_err(ApiError::from)?;
+            let row = row.ok_or(ApiError::Unauthorized)?;
+            let role = if row.role == "admin" { Role::Admin } else { Role::User };
+            return Ok(CurrentUser { id: row.id, username: row.username, role, node_label: row.node_label, uid: row.uid, gid: row.gid });
+        }
 
-        let row = row.ok_or(ApiError::Unauthorized)?;
-        let role = if row.role == "admin" { Role::Admin } else { Role::User };
-        Ok(CurrentUser { id: row.id, username: row.username, role, node_label: row.node_label })
+        let bearer =
+            parts.headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "));
+        if let Some(token) = bearer
+            && let Some(user) = user_from_api_token(&state.pg, token).await?
+        {
+            return Ok(user);
+        }
+        Err(ApiError::Unauthorized)
     }
+}
+
+#[derive(FromRow)]
+struct ApiTokenUserRow {
+    token_id: i32,
+    id: i32,
+    username: String,
+    role: String,
+    node_label: Option<String>,
+    uid: Option<i32>,
+    gid: Option<i32>,
+}
+
+/// Resolves an `Authorization: Bearer <token>` value to the account that
+/// created it, and records the attempt in `last_used_at` so an admin can
+/// tell a stale token from one still in active use before revoking it.
+async fn user_from_api_token(pg: &sqlx::PgPool, token: &str) -> Result<Option<CurrentUser>, ApiError> {
+    let hash = hash_token(token);
+    let row: Option<ApiTokenUserRow> = sqlx::query_as(
+        "SELECT t.id AS token_id, u.id, u.username, u.role, u.node_label, u.uid, u.gid \
+         FROM api_tokens t JOIN users u ON u.id = t.user_id \
+         WHERE t.token_hash = $1",
+    )
+    .bind(&hash)
+    .fetch_optional(pg)
+    .await?;
+    let Some(row) = row else { return Ok(None) };
+
+    sqlx::query("UPDATE api_tokens SET last_used_at = now() WHERE id = $1").bind(row.token_id).execute(pg).await?;
+    Ok(Some(CurrentUser {
+        id: row.id,
+        username: row.username,
+        role: if row.role == "admin" { Role::Admin } else { Role::User },
+        node_label: row.node_label,
+        uid: row.uid,
+        gid: row.gid,
+    }))
 }
 
 /// Loads a user directly by id, for the paths that establish identity from
@@ -98,12 +180,14 @@ impl FromRequestParts<AppState> for CurrentUser {
 /// therefore never receives that cookie.
 pub async fn user_by_id(pg: &sqlx::PgPool, id: i32) -> Result<Option<CurrentUser>, ApiError> {
     let row: Option<SessionUserRow> =
-        sqlx::query_as("SELECT id, username, role, node_label FROM users WHERE id = $1").bind(id).fetch_optional(pg).await?;
+        sqlx::query_as("SELECT id, username, role, node_label, uid, gid FROM users WHERE id = $1").bind(id).fetch_optional(pg).await?;
     Ok(row.map(|row| CurrentUser {
         id: row.id,
         username: row.username,
         role: if row.role == "admin" { Role::Admin } else { Role::User },
         node_label: row.node_label,
+        uid: row.uid,
+        gid: row.gid,
     }))
 }
 
@@ -130,6 +214,8 @@ struct UserAuthRow {
     password_hash: String,
     role: String,
     node_label: Option<String>,
+    uid: Option<i32>,
+    gid: Option<i32>,
 }
 
 pub async fn login(
@@ -147,10 +233,11 @@ pub async fn login(
         ));
     }
 
-    let row: Option<UserAuthRow> = sqlx::query_as("SELECT id, username, password_hash, role, node_label FROM users WHERE username = $1")
-        .bind(&req.username)
-        .fetch_optional(&state.pg)
-        .await?;
+    let row: Option<UserAuthRow> =
+        sqlx::query_as("SELECT id, username, password_hash, role, node_label, uid, gid FROM users WHERE username = $1")
+            .bind(&req.username)
+            .fetch_optional(&state.pg)
+            .await?;
 
     let row = row.filter(|r| verify_password(&r.password_hash, &req.password));
     let Some(row) = row else {
@@ -190,7 +277,10 @@ pub async fn login(
         .build();
 
     let role = if row.role == "admin" { Role::Admin } else { Role::User };
-    Ok((jar.add(cookie), Json(UserInfo { id: row.id, username: row.username, role, node_label: row.node_label })))
+    Ok((
+        jar.add(cookie),
+        Json(UserInfo { id: row.id, username: row.username, role, node_label: row.node_label, uid: row.uid, gid: row.gid }),
+    ))
 }
 
 pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> Result<CookieJar, ApiError> {
@@ -203,7 +293,7 @@ pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> Result<Coo
 }
 
 pub async fn me(user: CurrentUser) -> Json<UserInfo> {
-    Json(UserInfo { id: user.id, username: user.username, role: user.role, node_label: user.node_label })
+    Json(UserInfo { id: user.id, username: user.username, role: user.role, node_label: user.node_label, uid: user.uid, gid: user.gid })
 }
 
 /// Lets a logged-in user change their own password, proving they know the
@@ -273,4 +363,25 @@ pub async fn list_sessions(user: CurrentUser, State(state): State<AppState>) -> 
         .await?
     };
     Ok(Json(rows.into_iter().map(SessionLogEntry::from).collect()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_tokens_are_prefixed_and_high_entropy() {
+        let token = generate_api_token();
+        assert!(token.starts_with("aat_"), "expected an \"aat_\" prefix, got {token}");
+        assert_eq!(token.len(), "aat_".len() + 48);
+        assert_ne!(generate_api_token(), generate_api_token(), "two tokens should never collide");
+    }
+
+    #[test]
+    fn token_hashing_is_deterministic_but_not_reversible_by_inspection() {
+        let token = "aat_exampletoken";
+        assert_eq!(hash_token(token), hash_token(token), "the same token must always hash the same way");
+        assert_ne!(hash_token(token), token, "the hash must not just be the input echoed back");
+        assert_ne!(hash_token("aat_exampletokex"), hash_token(token), "a one-character difference must change the hash");
+    }
 }

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-04
+
 ### Added
 
 - Horizontal scaling and zero-downtime rolling restarts: `replicaCount` is
@@ -85,6 +87,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   above) so a running pod is never left holding a credential Aether itself
   no longer knows. 400s if this deployment has no auto-generated
   credential to begin with.
+- **Per-user UID/GID**: an admin can assign a UID and/or GID to a user
+  account from the Users tab (`PUT /api/users/{id}/uid-gid`). Every
+  Deployment that account launches afterward gets a matching pod
+  `securityContext` (`runAsUser`/`runAsGroup`/`fsGroup`), so different
+  users' pods can each own their own files on a shared NFS mount instead of
+  everything colliding on one identity. UID and GID are independent — set
+  or clear either on its own; `null`/`null` (the default) leaves the
+  container image's own default untouched. `0` is rejected (that's root).
+  Like node placement, fixed at launch time, not retroactive, and not
+  editable post-launch.
+- **Admin API tokens**: a new API Tokens admin tab lets an admin mint a
+  long-lived credential for their own account (`POST /api/tokens`, body
+  `{name}`), for scripting against the API without storing a real password
+  or re-logging-in for a session cookie. The raw value is returned once,
+  at creation, and never again — only its SHA-256 hash is stored. Send it
+  as `Authorization: Bearer <token>` instead of a session cookie; it
+  authenticates as whichever account created it, with that account's own
+  role. `GET /api/tokens` lists an admin's own tokens (name, created/
+  last-used timestamps, never the raw value); `DELETE /api/tokens/{id}`
+  revokes one immediately. No expiry/rotation yet — revocation is always
+  explicit, though deleting the underlying account cascades to its tokens.
 
 ### Changed
 

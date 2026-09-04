@@ -9,6 +9,7 @@ mod quota;
 mod resources;
 mod state;
 mod templates;
+mod tokens;
 mod users;
 mod validate;
 mod visibility;
@@ -140,6 +141,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/users/{id}", axum::routing::delete(users::delete_user))
         .route("/api/users/{id}/password", put(users::reset_password))
         .route("/api/users/{id}/node-label", put(users::set_node_label))
+        .route("/api/users/{id}/uid-gid", put(users::set_uid_gid))
+        .route("/api/tokens", get(tokens::list_tokens).post(tokens::create_token))
+        .route("/api/tokens/{id}", axum::routing::delete(tokens::delete_token))
         .route("/api/pods", get(ws::list_pods))
         .route("/api/images", get(images::list_images).post(images::create_image))
         .route("/api/images/{id}", put(images::update_image).delete(images::delete_image))

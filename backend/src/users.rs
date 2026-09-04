@@ -1,6 +1,6 @@
 use axum::extract::{Path, State};
 use axum::Json;
-use common::{CreateUserRequest, ResetPasswordRequest, Role, SetNodeLabelRequest, UserInfo};
+use common::{CreateUserRequest, ResetPasswordRequest, Role, SetNodeLabelRequest, SetUidGidRequest, UserInfo};
 use k8s_openapi::api::apps::v1::Deployment;
 use kube::api::{Api, ListParams};
 use sqlx::FromRow;
@@ -17,6 +17,8 @@ struct UserRow {
     username: String,
     role: String,
     node_label: Option<String>,
+    uid: Option<i32>,
+    gid: Option<i32>,
 }
 
 impl From<UserRow> for UserInfo {
@@ -26,13 +28,16 @@ impl From<UserRow> for UserInfo {
             username: row.username,
             role: if row.role == "admin" { Role::Admin } else { Role::User },
             node_label: row.node_label,
+            uid: row.uid,
+            gid: row.gid,
         }
     }
 }
 
 pub async fn list_users(_admin: AdminUser, State(state): State<AppState>) -> Result<Json<Vec<UserInfo>>, ApiError> {
-    let rows: Vec<UserRow> =
-        sqlx::query_as("SELECT id, username, role, node_label FROM users ORDER BY username").fetch_all(&state.pg).await?;
+    let rows: Vec<UserRow> = sqlx::query_as("SELECT id, username, role, node_label, uid, gid FROM users ORDER BY username")
+        .fetch_all(&state.pg)
+        .await?;
     Ok(Json(rows.into_iter().map(UserInfo::from).collect()))
 }
 
@@ -48,7 +53,7 @@ pub async fn create_user(
     let role_str = if req.role == Role::Admin { "admin" } else { "user" };
 
     let row: UserRow = sqlx::query_as(
-        "INSERT INTO users (username, password_hash, role) VALUES ($1, $2, $3) RETURNING id, username, role, node_label",
+        "INSERT INTO users (username, password_hash, role) VALUES ($1, $2, $3) RETURNING id, username, role, node_label, uid, gid",
     )
         .bind(&req.username)
         .bind(&password_hash)
@@ -138,6 +143,34 @@ pub async fn set_node_label(
     let row: Option<UserRow> =
         sqlx::query_as("UPDATE users SET node_label = $1 WHERE id = $2 RETURNING id, username, role, node_label")
             .bind(&node_label)
+            .bind(id)
+            .fetch_optional(&state.pg)
+            .await?;
+    let row = row.ok_or_else(|| ApiError::BadRequest(format!("user {id} not found")))?;
+    Ok(Json(row.into()))
+}
+
+/// Sets (or, with `uid`/`gid: None`, clears) the UID/GID a user's future
+/// launches run their container as — see `deployments::security_context_for`,
+/// which reads it off `CurrentUser` at launch time. `uid` and `gid` are
+/// independent (either can be set without the other). Existing Deployments
+/// are untouched; this only affects new launches, same as `set_node_label`.
+pub async fn set_uid_gid(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Path(id): Path<i32>,
+    Json(req): Json<SetUidGidRequest>,
+) -> Result<Json<UserInfo>, ApiError> {
+    if let Some(uid) = req.uid {
+        validate::uid_gid("uid", uid)?;
+    }
+    if let Some(gid) = req.gid {
+        validate::uid_gid("gid", gid)?;
+    }
+    let row: Option<UserRow> =
+        sqlx::query_as("UPDATE users SET uid = $1, gid = $2 WHERE id = $3 RETURNING id, username, role, node_label, uid, gid")
+            .bind(req.uid)
+            .bind(req.gid)
             .bind(id)
             .fetch_optional(&state.pg)
             .await?;

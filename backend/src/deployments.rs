@@ -8,8 +8,8 @@ use common::{
 };
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec, ReplicaSet};
 use k8s_openapi::api::core::v1::{
-    Container, EnvVar, HTTPGetAction, PersistentVolumeClaim, PersistentVolumeClaimVolumeSource, PodSpec,
-    PodTemplateSpec, Probe, ResourceRequirements, Service, ServicePort, ServiceSpec, Volume, VolumeMount,
+    Container, EnvVar, HTTPGetAction, PersistentVolumeClaim, PersistentVolumeClaimVolumeSource, PodSecurityContext,
+    PodSpec, PodTemplateSpec, Probe, ResourceRequirements, Service, ServicePort, ServiceSpec, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
@@ -145,6 +145,26 @@ fn substitute_args(raw_args: &[String], name: &str, ctx: &ArgsContext) -> Vec<St
 fn node_selector_for(user: &CurrentUser) -> Option<BTreeMap<String, String>> {
     let (key, value) = user.node_label.as_deref()?.split_once('=')?;
     Some(BTreeMap::from([(key.to_string(), value.to_string())]))
+}
+
+/// Builds a pod `securityContext` from a user's admin-set UID/GID
+/// (validated at write-time by `validate::uid_gid`, so these are always
+/// positive if set at all) — `runAsUser`/`runAsGroup` so the container's
+/// process itself runs as that identity, and `fsGroup` so files it creates
+/// on a mounted volume (a shared NFS claim, say) come out owned by that
+/// group too, rather than whatever the volume's own root ownership happens
+/// to be. `None` if the user has neither set, leaving the image's own
+/// default untouched. `uid`/`gid` are independent: either can be set alone.
+fn security_context_for(user: &CurrentUser) -> Option<PodSecurityContext> {
+    if user.uid.is_none() && user.gid.is_none() {
+        return None;
+    }
+    Some(PodSecurityContext {
+        run_as_user: user.uid.map(i64::from),
+        run_as_group: user.gid.map(i64::from),
+        fs_group: user.gid.map(i64::from),
+        ..Default::default()
+    })
 }
 
 /// Errors if `user` isn't allowed to manage `deployment` — an admin always
@@ -404,6 +424,7 @@ pub async fn create_deployment(
                 }),
                 spec: Some(PodSpec {
                     node_selector: node_selector_for(&user),
+                    security_context: security_context_for(&user),
                     volumes,
                     containers: vec![Container {
                         name: scoped_name.clone(),
