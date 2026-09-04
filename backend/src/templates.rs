@@ -24,6 +24,8 @@ struct TemplateRow {
     env: SqlxJson<Vec<(String, String)>>,
     args: Vec<String>,
     model: String,
+    context_length: Option<i64>,
+    quantization: String,
     volume_claim_name: String,
     volume_mount_path: String,
     volume_sub_path: String,
@@ -50,6 +52,8 @@ impl From<TemplateRow> for TemplateEntry {
             env: row.env.0,
             args: row.args,
             model: row.model,
+            context_length: row.context_length,
+            quantization: row.quantization,
             volume_claim_name: row.volume_claim_name,
             volume_mount_path: row.volume_mount_path,
             volume_sub_path: row.volume_sub_path,
@@ -65,8 +69,9 @@ impl From<TemplateRow> for TemplateEntry {
 // `SELECT_COLUMNS` is a compile-time constant, never user input, so interpolating it
 // into these queries with `AssertSqlSafe` below is not a SQL-injection risk.
 const SELECT_COLUMNS: &str = "id, name, image, container_port, cpu_request, cpu_limit, memory_request, \
-     memory_limit, accelerator_type, accelerator_count, env, args, model, volume_claim_name, \
-     volume_mount_path, volume_sub_path, notes, secret_env_key, proxy_enabled, strip_prefix, public_service";
+     memory_limit, accelerator_type, accelerator_count, env, args, model, context_length, quantization, \
+     volume_claim_name, volume_mount_path, volume_sub_path, notes, secret_env_key, proxy_enabled, \
+     strip_prefix, public_service";
 
 pub async fn list_templates(
     _user: CurrentUser,
@@ -85,9 +90,10 @@ pub async fn create_template(
     validate_request(&req)?;
     let sql = format!(
         "INSERT INTO templates (name, image, container_port, cpu_request, cpu_limit, memory_request, \
-         memory_limit, accelerator_type, accelerator_count, env, args, model, volume_claim_name, \
-         volume_mount_path, volume_sub_path, notes, secret_env_key, proxy_enabled, strip_prefix, public_service) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) \
+         memory_limit, accelerator_type, accelerator_count, env, args, model, context_length, quantization, \
+         volume_claim_name, volume_mount_path, volume_sub_path, notes, secret_env_key, proxy_enabled, \
+         strip_prefix, public_service) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22) \
          RETURNING {SELECT_COLUMNS}"
     );
     let row: TemplateRow = sqlx::query_as(AssertSqlSafe(sql))
@@ -103,6 +109,8 @@ pub async fn create_template(
         .bind(SqlxJson(&req.env))
         .bind(&req.args)
         .bind(&req.model)
+        .bind(req.context_length)
+        .bind(&req.quantization)
         .bind(&req.volume_claim_name)
         .bind(&req.volume_mount_path)
         .bind(&req.volume_sub_path)
@@ -126,9 +134,10 @@ pub async fn update_template(
     let sql = format!(
         "UPDATE templates SET name = $1, image = $2, container_port = $3, cpu_request = $4, cpu_limit = $5, \
          memory_request = $6, memory_limit = $7, accelerator_type = $8, accelerator_count = $9, env = $10, \
-         args = $11, model = $12, volume_claim_name = $13, volume_mount_path = $14, volume_sub_path = $15, \
-         notes = $16, secret_env_key = $17, proxy_enabled = $18, strip_prefix = $19, public_service = $20 \
-         WHERE id = $21 \
+         args = $11, model = $12, context_length = $13, quantization = $14, volume_claim_name = $15, \
+         volume_mount_path = $16, volume_sub_path = $17, notes = $18, secret_env_key = $19, \
+         proxy_enabled = $20, strip_prefix = $21, public_service = $22 \
+         WHERE id = $23 \
          RETURNING {SELECT_COLUMNS}"
     );
     let row: Option<TemplateRow> = sqlx::query_as(AssertSqlSafe(sql))
@@ -144,6 +153,8 @@ pub async fn update_template(
         .bind(SqlxJson(&req.env))
         .bind(&req.args)
         .bind(&req.model)
+        .bind(req.context_length)
+        .bind(&req.quantization)
         .bind(&req.volume_claim_name)
         .bind(&req.volume_mount_path)
         .bind(&req.volume_sub_path)
@@ -187,6 +198,12 @@ fn validate_request(req: &SaveTemplateRequest) -> Result<(), ApiError> {
     validate::bounded_list("env", &req.env.iter().map(|(_, v)| v.clone()).collect::<Vec<_>>(), 50, 4096)?;
     validate::bounded_list("args", &req.args, 50, 1024)?;
     validate::optional_text("model", &req.model, 500)?;
+    validate::optional_text("quantization", &req.quantization, 100)?;
+    if let Some(n) = req.context_length
+        && n <= 0
+    {
+        return Err(ApiError::BadRequest("context_length: must be positive".to_string()));
+    }
     validate::volume_mount(&req.volume_claim_name, &req.volume_mount_path)?;
     if req.notes.chars().count() > 2000 {
         return Err(ApiError::BadRequest("notes: must be at most 2000 characters".to_string()));

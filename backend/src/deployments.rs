@@ -76,6 +76,52 @@ fn scoped_deployment_name(username: &str, instance_type: &str) -> String {
     format!("{username}-{truncated}-{suffix}")
 }
 
+/// Substitutes each `args` line's placeholders and drops lines that
+/// reference an unset optional one.
+///
+/// `{{name}}` (the deployment's own generated name) and
+/// `{{accelerator_count}}` (however many accelerators were requested,
+/// defaulting to `1` if none were — so a template whose args always
+/// reference it, e.g. vLLM's `--tensor-parallel-size`, doesn't end up with
+/// a nonsensical 0) always have a value, so they're always substituted.
+///
+/// `{{model}}`/`{{context_length}}`/`{{quantization}}` are genuinely
+/// optional — substituting an empty string for an unset one would send a
+/// broken `--flag=` with nothing after the `=`. Instead, a line containing
+/// one of these is dropped *entirely* when that field is unset, so a
+/// template's args can always list an optional flag on its own line and
+/// have it simply not appear rather than reaching the container broken.
+fn substitute_args(
+    raw_args: &[String],
+    name: &str,
+    accelerator_count: Option<i64>,
+    model: Option<&str>,
+    context_length: Option<i64>,
+    quantization: Option<&str>,
+) -> Vec<String> {
+    let accelerator_count_str = accelerator_count.filter(|&c| c > 0).unwrap_or(1).to_string();
+    let optional_placeholders: [(&str, Option<String>); 3] = [
+        ("{{model}}", model.filter(|s| !s.is_empty()).map(str::to_string)),
+        ("{{context_length}}", context_length.map(|n| n.to_string())),
+        ("{{quantization}}", quantization.filter(|s| !s.is_empty()).map(str::to_string)),
+    ];
+    raw_args
+        .iter()
+        .filter_map(|raw| {
+            let mut arg = raw.trim().replace("{{name}}", name).replace("{{accelerator_count}}", &accelerator_count_str);
+            for (token, value) in &optional_placeholders {
+                if arg.contains(token) {
+                    match value {
+                        Some(v) => arg = arg.replace(token, v),
+                        None => return None,
+                    }
+                }
+            }
+            (!arg.is_empty()).then_some(arg)
+        })
+        .collect()
+}
+
 /// Parses a user's admin-set "key=value" node label (validated at
 /// write-time by `validate::node_label`, so this only ever sees a
 /// well-formed value) into the single-entry map `PodSpec::node_selector`
@@ -143,6 +189,12 @@ pub async fn create_deployment(
         return Err(ApiError::BadRequest("enable_proxy requires container_port".into()));
     }
     validate::optional_text("model", req.model.as_deref().unwrap_or(""), 500)?;
+    validate::optional_text("quantization", req.quantization.as_deref().unwrap_or(""), 100)?;
+    if let Some(n) = req.context_length
+        && n <= 0
+    {
+        return Err(ApiError::BadRequest("context_length: must be positive".into()));
+    }
     validate::volume_mount(req.volume_claim_name.as_deref().unwrap_or(""), req.volume_mount_path.as_deref().unwrap_or(""))?;
     if let Some(claim_name) = &req.volume_claim_name {
         // Shape was already checked above; this confirms it's real, so a
@@ -238,26 +290,7 @@ pub async fn create_deployment(
         env.push(EnvVar { name: key.clone(), value: Some(value.clone()), ..Default::default() });
         value
     });
-    // "{{name}}" refers to the deployment's own generated name, e.g.
-    // JupyterLab's `--ServerApp.base_url=/proxy/{{name}}/`. "{{model}}" is
-    // req.model (a Hugging Face ID or a path under volume_mount_path below —
-    // just a string either way). "{{accelerator_count}}" is however many
-    // GPUs were actually requested (defaulting to 1 if none were, so a
-    // template whose args always reference it - e.g. vLLM's
-    // --tensor-parallel-size - doesn't end up with a nonsensical 0).
-    let model = req.model.clone().unwrap_or_default();
-    let accelerator_count_str = req.accelerator_count.filter(|&c| c > 0).unwrap_or(1).to_string();
-    let args: Vec<String> = req
-        .args
-        .iter()
-        .map(|a| {
-            a.trim()
-                .replace("{{name}}", &scoped_name)
-                .replace("{{model}}", &model)
-                .replace("{{accelerator_count}}", &accelerator_count_str)
-        })
-        .filter(|a| !a.is_empty())
-        .collect();
+    let args = substitute_args(&req.args, &scoped_name, req.accelerator_count, req.model.as_deref(), req.context_length, req.quantization.as_deref());
     // `args` gets moved into the Container below; keep a copy for launch_log.
     let logged_args = args.clone();
 
@@ -846,5 +879,48 @@ mod tests {
         let name = scoped_deployment_name(&username, &instance_type);
         assert!(name.len() <= 63, "{} chars: {name}", name.len());
         assert!(name.starts_with(&format!("{username}-")));
+    }
+
+    #[test]
+    fn substitute_args_always_fills_in_name_and_accelerator_count() {
+        let args = vec!["--name={{name}}".to_string(), "--tp={{accelerator_count}}".to_string()];
+        assert_eq!(substitute_args(&args, "alice-jupyter-abc123", None, None, None, None), vec![
+            "--name=alice-jupyter-abc123",
+            "--tp=1", // no accelerators requested -> defaults to 1, not 0
+        ]);
+        assert_eq!(
+            substitute_args(&args, "alice-jupyter-abc123", Some(4), None, None, None),
+            vec!["--name=alice-jupyter-abc123", "--tp=4"]
+        );
+    }
+
+    #[test]
+    fn substitute_args_drops_lines_for_unset_optional_placeholders() {
+        let args = vec![
+            "--model={{model}}".to_string(),
+            "--max-model-len={{context_length}}".to_string(),
+            "--quantization={{quantization}}".to_string(),
+            "--always-here".to_string(),
+        ];
+        // Nothing set beyond the always-present ones: only the plain line survives.
+        assert_eq!(substitute_args(&args, "n", None, None, None, None), vec!["--always-here"]);
+
+        // Setting all three keeps all four lines, substituted.
+        assert_eq!(
+            substitute_args(&args, "n", None, Some("meta-llama/Llama-3-8B"), Some(8192), Some("awq")),
+            vec!["--model=meta-llama/Llama-3-8B", "--max-model-len=8192", "--quantization=awq", "--always-here"]
+        );
+
+        // Only model set: the other two optional lines are dropped, not left broken.
+        assert_eq!(
+            substitute_args(&args, "n", None, Some("meta-llama/Llama-3-8B"), None, None),
+            vec!["--model=meta-llama/Llama-3-8B", "--always-here"]
+        );
+    }
+
+    #[test]
+    fn substitute_args_treats_empty_strings_as_unset() {
+        let args = vec!["--model={{model}}".to_string()];
+        assert_eq!(substitute_args(&args, "n", None, Some(""), None, None), Vec::<String>::new());
     }
 }
