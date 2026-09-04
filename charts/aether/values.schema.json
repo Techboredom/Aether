@@ -16,6 +16,16 @@
       "type": "string",
       "description": "Required. The public hostname Aether is served from, e.g. aether.example.com. The chart refuses to render without this set."
     },
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Safe above 1: session/proxy state lives in Postgres and quota enforcement uses a Postgres advisory lock, not in-process state."
+    },
+    "terminationGracePeriodSeconds": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Must comfortably exceed the app's own ~5s post-SIGTERM wait plus real request completion time. Does not help already-open long-lived connections (proxied app sessions, the Pods tab's live-update WebSocket)."
+    },
     "proxy": {
       "type": "object",
       "properties": {

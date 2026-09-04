@@ -101,6 +101,8 @@ and their required credentials.
 | `image.pullPolicy` | `IfNotPresent` | |
 | `image.pullSecrets` | `[]` | Names of existing image-pull Secrets. |
 | `host` | `""` | **Required.** Public hostname Aether is served from. |
+| `replicaCount` | `1` | Safe to raise — see "High availability" below. |
+| `terminationGracePeriodSeconds` | `30` | Must exceed the app's own post-`SIGTERM` drain wait (~5s) plus real request completion time. |
 | `proxy.baseDomain` | `""` | Base domain for per-deployment proxy origins; defaults to `proxy.<host>`. |
 | `proxy.separateOrigins` | `true` | Serve each proxied deployment from its own origin. Recommended; see below before turning off. |
 | `proxy.allowSameOriginProxy` | `false` | Must be `true` to set `proxy.separateOrigins=false`. |
@@ -145,6 +147,28 @@ rather than produce a broken or quietly-insecure install:
   using `separateOrigins` + cert-manager TLS — a wildcard certificate only
   ever covers one label, matching `ProxyOrigin::deployment_for_host` in
   the backend.
+
+## High availability
+
+`replicaCount` can be raised above the default of 1 — session cookies,
+proxy handoff tokens, and quota enforcement all live in Postgres (a
+Postgres advisory lock, specifically, not an in-process mutex), so
+multiple replicas stay correct rather than each independently
+under-enforcing quota or losing the others' sessions.
+
+A rollout is zero-downtime **even at the default of 1 replica**: the
+Deployment's `RollingUpdate` strategy (`maxUnavailable: 0, maxSurge: 1`)
+brings up a new, ready pod before removing the old one, and the app
+drains in-flight HTTP requests on `SIGTERM` rather than dropping them (see
+`terminationGracePeriodSeconds` above).
+
+What this doesn't cover: a connection already upgraded to a raw byte
+stream — the Pods tab's live-update WebSocket, or a proxied deployment's
+tunneled WebSocket (e.g. a JupyterLab kernel session) — isn't drained
+gracefully. Those end when their pod does, the same as with any other
+rolling restart of a stateful WebSocket server; the client reconnecting
+(or the user retrying) is what recovers, not something this chart or the
+backend's shutdown handling can paper over.
 
 ## Verifying an install
 

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Horizontal scaling and zero-downtime rolling restarts: `replicaCount` is
+  now a chart value (was hardcoded to 1), with a `RollingUpdate` strategy
+  (`maxUnavailable: 0, maxSurge: 1`) so a rollout never drops below full
+  capacity, even at the default of one replica.
+- Graceful shutdown: the backend now drains in-flight HTTP requests on
+  `SIGTERM` instead of dropping them immediately, pausing briefly first to
+  give Kubernetes time to remove the terminating pod from Service
+  endpoints (in place of a `preStop` hook, since the distroless runtime
+  image has no shell to run one).
+
+### Changed
+
+- Quota enforcement's launch-serializing lock (`AppState::lock_launches`)
+  is now a Postgres advisory lock instead of an in-process `Mutex` — the
+  in-process version only serialized concurrent requests within a single
+  replica, which would have silently under-enforced quota the moment a
+  second replica (or an old+new pod overlapping mid-rollout) existed.
+
 ## [0.1.1] - 2026-09-03
 
 ### Fixed

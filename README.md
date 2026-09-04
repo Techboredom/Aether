@@ -713,6 +713,16 @@ else specifically). `database.deploy.enabled=true` deploys a bundled,
 evaluation-only single-replica Postgres instead, for trying this out
 without a database of your own on hand.
 
+Aether itself can run more than one replica (`replicaCount` in the
+chart) — session cookies, proxy handoff tokens, and quota enforcement all
+live in Postgres rather than in-process, so replicas don't need to agree
+with each other about anything. A rolling restart is zero-downtime even
+at the default of one replica: the app drains in-flight HTTP requests on
+`SIGTERM` instead of dropping them, and the chart's rollout strategy
+never drops below full capacity. See `charts/aether/README.md`, "High
+availability", for what this doesn't cover (already-open long-lived
+connections — a proxied app session, or the Pods tab's live-update
+WebSocket — still end when their pod does).
 
 ## Security notes
 

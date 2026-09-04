@@ -6,7 +6,19 @@ metadata:
   labels:
     {{- include "aether.labels" . | nindent 4 }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.replicaCount }}
+  # Zero-downtime by default even at replicaCount 1: a new, ready pod comes
+  # up (maxSurge) before the old one is torn down (maxUnavailable: 0), so a
+  # rollout never drops below full capacity. Session/proxy state lives in
+  # Postgres, not in-process, and quota enforcement is a Postgres advisory
+  # lock rather than an in-process mutex (AppState::lock_launches) — both
+  # required before more than one replica (or an overlapping old+new pod
+  # during a rollout) could ever be correct at once.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       {{- include "aether.selectorLabels" . | nindent 6 }}
@@ -16,6 +28,14 @@ spec:
         {{- include "aether.selectorLabels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "aether.serviceAccountName" . }}
+      # Kubernetes removes a Terminating pod from Service endpoints
+      # asynchronously; the app itself waits out that window before it
+      # stops accepting new connections (see shutdown_signal in
+      # backend/src/main.rs) rather than using a preStop hook, since the
+      # distroless runtime image has no shell to run one. This just needs
+      # to be comfortably longer than that in-process wait plus however
+      # long a real in-flight request takes to finish.
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

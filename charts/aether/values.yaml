@@ -6,6 +6,23 @@ image:
   # Names of existing image-pull Secrets (e.g. for a private registry).
   pullSecrets: []
 
+# Safe to raise above 1 — session/proxy state lives in Postgres and quota
+# enforcement uses a Postgres advisory lock, not in-process state, so
+# multiple replicas (or an old+new pod briefly overlapping mid-rollout)
+# stay correct. A rolling update never drops below full capacity even at
+# the default of 1 (see templates/deployment.yaml's strategy).
+replicaCount: 1
+
+# How long a Terminating pod gets before Kubernetes sends SIGKILL. The app
+# itself waits ~5s after SIGTERM (giving Service endpoint removal time to
+# propagate) before it stops accepting new connections, then drains
+# in-flight HTTP requests — this needs to comfortably exceed that plus
+# however long a real request takes to finish. Doesn't help an
+# already-open long-lived connection (a proxied JupyterLab/RStudio session,
+# or the Pods tab's live-update WebSocket) — those still end when the pod
+# does, same as any other rolling restart of a stateful WebSocket server.
+terminationGracePeriodSeconds: 30
+
 # The one required value — everything else below has a working default.
 # The public hostname Aether itself is served from, e.g. "aether.example.com".
 host: ""
