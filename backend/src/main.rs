@@ -187,9 +187,60 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     // `ConnectInfo` (used by auth::login to record a login's source IP in
     // session_log) requires the connect-info-aware make-service.
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     Ok(())
+}
+
+/// Resolves once Kubernetes asks this pod to stop (`SIGTERM`) or a local
+/// `Ctrl+C`. Only after this resolves does axum stop accepting *new*
+/// connections and start waiting for in-flight ones to finish — without it,
+/// the default Rust runtime behavior on `SIGTERM` is to just exit
+/// immediately, silently dropping whatever requests were mid-flight.
+///
+/// Covers plain HTTP requests (login, launch, the REST API) — a real
+/// improvement for a rolling restart, since those now finish instead of
+/// getting reset. It does **not** extend to connections already upgraded to
+/// a raw byte stream (the pod-watch `/ws` WebSocket, or a proxied
+/// deployment's tunneled WebSocket in `proxy.rs`): once upgraded, those run
+/// on a detached task outside hyper's own request bookkeeping, so an
+/// already-open Jupyter kernel session or live Pods-tab connection still
+/// gets cut when the process actually exits. Solving that would mean
+/// tracking upgraded connections and waiting on them too — out of scope
+/// here; the client-side reconnect/retry behavior for those is what
+/// actually matters for those cases.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c().await.expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    tracing::info!("shutdown signal received, pausing before draining in-flight requests");
+    // Kubernetes removes a Terminating pod from its Service's endpoints
+    // asynchronously — there's a real (if usually brief) window where a new
+    // connection can still land here right after this signal arrives. This
+    // image has no shell (distroless), so it can't use the usual preStop
+    // `sleep` hook to cover that window; doing the same wait in-process
+    // here, before we actually stop accepting new connections below,
+    // accomplishes the same thing without needing one.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    tracing::info!("done waiting, no longer accepting new connections");
 }
 
 /// Liveness: is this process still serving HTTP at all? Deliberately checks

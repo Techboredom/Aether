@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use common::{PodEvent, PodInfo};
 use kube::Client;
-use sqlx::PgPool;
-use tokio::sync::{broadcast, Mutex, MutexGuard, RwLock};
+use sqlx::{PgPool, Postgres, Transaction};
+use tokio::sync::{broadcast, Mutex, RwLock};
 
 /// Serves each proxied deployment from its own origin
 /// (`<name>.<base_domain>`) rather than from a path on Aether's own origin.
@@ -134,7 +134,6 @@ pub struct AppState {
     pub app_origin: Option<String>,
     /// `None` = legacy same-origin `/proxy/<name>/` mode; see [`ProxyOrigin`].
     pub proxy_origin: Option<ProxyOrigin>,
-    launches: Arc<Mutex<()>>,
     login_throttle: LoginThrottle,
     pods: Arc<RwLock<HashMap<String, PodInfo>>>,
     events: broadcast::Sender<PodEvent>,
@@ -155,7 +154,6 @@ impl AppState {
             pg,
             app_origin,
             proxy_origin,
-            launches: Arc::new(Mutex::new(())),
             login_throttle: LoginThrottle::default(),
             pods: Arc::new(RwLock::new(HashMap::new())),
             events,
@@ -181,18 +179,34 @@ impl AppState {
         self.login_throttle.clear(ip).await;
     }
 
-    /// Serializes quota-checked writes (launch, scale, edit).
+    /// Serializes quota-checked writes (launch, scale, edit) across every
+    /// Aether replica, not just within one process.
     ///
     /// Quota is enforced by reading current usage and then writing — two
     /// requests interleaving between those steps would both see the
     /// pre-write total and both be allowed, letting a user step over their
-    /// quota just by launching twice at once. Held across the Kubernetes
-    /// write so the next caller reads a cluster that already includes it.
-    /// Global rather than per-user: these writes are infrequent and
-    /// short-lived, and one lock is far easier to reason about than a map of
-    /// them.
-    pub async fn lock_launches(&self) -> MutexGuard<'_, ()> {
-        self.launches.lock().await
+    /// quota just by launching twice at once (or, with more than one
+    /// replica, by two requests simply landing on different pods). A plain
+    /// in-process `Mutex` only ever serialized the first case; a Postgres
+    /// advisory lock, shared by every replica through the same database,
+    /// covers both. `pg_advisory_xact_lock` ties the lock to this
+    /// transaction's lifetime — it releases automatically on commit *or*
+    /// rollback, so an early return via `?` anywhere in the caller can't
+    /// leak it the way forgetting to call an explicit unlock could.
+    ///
+    /// The caller holds the returned transaction open across the
+    /// Kubernetes write itself (committing only once that succeeds), so the
+    /// next caller's read is guaranteed to see it. Global rather than
+    /// per-user: these writes are infrequent and short-lived, and one lock
+    /// is far easier to reason about than a map of them.
+    pub async fn lock_launches(&self) -> Result<Transaction<'_, Postgres>, sqlx::Error> {
+        // Arbitrary constant, shared by every replica: Postgres advisory
+        // locks are just integers, meaningful only in that the same number
+        // means the same lock.
+        const LAUNCH_LOCK_KEY: i64 = 727_100_001;
+        let mut tx = self.pg.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)").bind(LAUNCH_LOCK_KEY).execute(&mut *tx).await?;
+        Ok(tx)
     }
 
     /// The URL that opens `deployment` — an absolute URL on its own origin
