@@ -22,7 +22,6 @@ pub fn CreateDeploymentTab() -> impl IntoView {
     let selected_template_id = RwSignal::new(String::new());
     let selected_template_name = RwSignal::new(None::<String>);
 
-    let name = RwSignal::new(String::new());
     let image = RwSignal::new(String::new());
     let replicas = RwSignal::new("1".to_string());
     let container_port = RwSignal::new(String::new());
@@ -76,7 +75,6 @@ pub fn CreateDeploymentTab() -> impl IntoView {
     let apply_template = move |t: &TemplateEntry| {
         selected_template_name.set(Some(t.name.clone()));
         notes.set(if t.notes.trim().is_empty() { None } else { Some(t.notes.clone()) });
-        name.set(slugify(&t.name));
         image.set(t.image.clone());
         container_port.set(t.container_port.map(|p| p.to_string()).unwrap_or_default());
         cpu_request.set(t.cpu_request.clone());
@@ -99,7 +97,6 @@ pub fn CreateDeploymentTab() -> impl IntoView {
     let reset_to_custom = move || {
         selected_template_name.set(None);
         notes.set(None);
-        name.set(String::new());
         image.set(String::new());
         container_port.set(String::new());
         cpu_request.set(String::new());
@@ -144,7 +141,6 @@ pub fn CreateDeploymentTab() -> impl IntoView {
         let args: Vec<String> = args_text.get().lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
 
         let req = CreateDeploymentRequest {
-            name: name.get().trim().to_string(),
             template_name: selected_template_name.get(),
             image: image.get(),
             replicas: replicas.get().trim().parse().unwrap_or(1),
@@ -220,19 +216,6 @@ pub fn CreateDeploymentTab() -> impl IntoView {
                     };
                     text.map(|text| view! { <div class="template-notes">{text}</div> })
                 }}
-
-                <label>
-                    "Name"
-                    <input
-                        type="text"
-                        required=true
-                        maxlength="63"
-                        pattern="[a-z0-9]([-a-z0-9]*[a-z0-9])?"
-                        title="Lowercase alphanumeric characters or '-', starting and ending with a letter or digit"
-                        prop:value=move || name.get()
-                        on:input=move |ev| name.set(event_target_value(&ev))
-                    />
-                </label>
 
                 <label>
                     "Image"
@@ -408,26 +391,6 @@ pub fn CreateDeploymentTab() -> impl IntoView {
 fn non_empty(s: String) -> Option<String> {
     let trimmed = s.trim();
     if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
-}
-
-/// Lowercase, alphanumeric-and-hyphen only — used to turn a template name
-/// like "JupyterLab" into a starting point for the deployment name field.
-fn slugify(s: &str) -> String {
-    let mut out = String::new();
-    let mut last_was_dash = false;
-    for c in s.chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c.to_ascii_lowercase());
-            last_was_dash = false;
-        } else if !last_was_dash && !out.is_empty() {
-            out.push('-');
-            last_was_dash = true;
-        }
-    }
-    if out.ends_with('-') {
-        out.pop();
-    }
-    out
 }
 
 async fn submit(req: CreateDeploymentRequest) -> LaunchResult {

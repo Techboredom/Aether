@@ -39,6 +39,16 @@ pub fn generate_token() -> String {
     rand::rng().sample_iter(Alphanumeric).take(48).map(char::from).collect()
 }
 
+/// A short random suffix for auto-generated deployment names
+/// (`<username>-<instance-type>-<suffix>`, see deployments.rs). Lowercased
+/// on purpose — `Alphanumeric` samples upper+lower+digit, but a Kubernetes
+/// name only allows lowercase — this isn't a security token, so folding
+/// case just to stay in-alphabet costs nothing worth worrying about here,
+/// unlike `generate_token` above.
+pub fn generate_name_suffix() -> String {
+    rand::rng().sample_iter(Alphanumeric).take(6).map(|b| (b as char).to_ascii_lowercase()).collect()
+}
+
 /// The authenticated caller, extracted from the `aether_session` cookie.
 /// Any endpoint that takes this as a parameter requires a logged-in user of
 /// either role — use `AdminUser` instead for admin-only endpoints.

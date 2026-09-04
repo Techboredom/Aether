@@ -89,13 +89,16 @@ pub struct SaveImageRequest {
     pub description: String,
 }
 
-/// Submitted by the "create deployment" form.
+/// Submitted by the "create deployment" form. There's no user-chosen name —
+/// the backend generates one (`<username>-<instance-type>-<random>`, see
+/// deployments.rs::create_deployment) so launching never requires picking
+/// something unique yourself.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CreateDeploymentRequest {
-    pub name: String,
     /// Name of the template this was launched from, if any (`None` for a
-    /// Custom launch) — purely descriptive, carried through to `launch_log`
-    /// for support/metrics; doesn't affect how the deployment is built.
+    /// Custom launch) — used both for `launch_log` and as the auto-generated
+    /// name's "instance type" segment (falling back to a slug of `image`
+    /// for a Custom launch, which has no template name to use instead).
     #[serde(default)]
     pub template_name: Option<String>,
     pub image: String,

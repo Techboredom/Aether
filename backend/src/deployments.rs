@@ -14,7 +14,7 @@ use kube::api::{Api, DeleteParams, PostParams};
 use sqlx::types::Json as SqlxJson;
 use sqlx::FromRow;
 
-use crate::auth::{generate_token, CurrentUser};
+use crate::auth::{generate_name_suffix, generate_token, CurrentUser};
 use crate::error::ApiError;
 use crate::quota;
 use crate::resources::{parse_count, parse_cpu_millicores, parse_memory_bytes, OWNER_LABEL};
@@ -30,6 +30,49 @@ use crate::validate;
 /// which is what they meant.
 pub fn normalize_quantity(value: Option<String>) -> Option<String> {
     value.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
+/// Lowercase, alphanumeric-and-hyphen only, runs of anything else collapsed
+/// to a single '-' with none leading/trailing — turns a display string
+/// (a template's name, or an image's repository component) into something
+/// usable as part of a Kubernetes name.
+fn slugify(s: &str) -> String {
+    s.to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// A slug for the "instance type" segment of an auto-generated name when
+/// there's no template to name it after (a Custom launch): the image's own
+/// repository name, stripped of registry/org path, tag, and digest — e.g.
+/// "ctr.example.com:8443/aether/aether:v1" and "jupyter/base-notebook" slug
+/// to "aether" and "base-notebook" respectively.
+fn image_repo_slug(image: &str) -> String {
+    let repo = image.rsplit('/').next().unwrap_or(image);
+    let repo = repo.split(['@', ':']).next().unwrap_or(repo);
+    let slug = slugify(repo);
+    if slug.is_empty() { "app".to_string() } else { slug }
+}
+
+/// Builds `<username>-<instance_type>-<random>` (the actual Deployment/
+/// Service name), truncating `instance_type` as needed to stay within
+/// Kubernetes' 63-character name limit — silently, since it's just a
+/// descriptive slug and there's no user-facing field to ask them to
+/// shorten. The random suffix is fixed-length and generated first so the
+/// truncation budget for `instance_type` is exact.
+fn scoped_deployment_name(username: &str, instance_type: &str) -> String {
+    let suffix = generate_name_suffix();
+    // Two separating hyphens, plus the username and suffix, are fixed
+    // overhead; whatever's left is instance_type's budget.
+    let budget = 63usize.saturating_sub(username.len() + suffix.len() + 2);
+    let truncated: String = instance_type.chars().take(budget).collect();
+    let truncated = truncated.trim_end_matches('-');
+    format!("{username}-{truncated}-{suffix}")
 }
 
 /// Parses a user's admin-set "key=value" node label (validated at
@@ -68,21 +111,6 @@ pub async fn create_deployment(
     req.memory_request = normalize_quantity(req.memory_request.take());
     req.memory_limit = normalize_quantity(req.memory_limit.take());
 
-    validate::k8s_name("name", &req.name)?;
-    // Deployment names are shared across every user in this one namespace;
-    // prefixing with the caller's own username means a name only has to be
-    // unique among what *that* user has launched, not everyone's. Safe as a
-    // plain string join because usernames are validated against the same
-    // DNS-1123 grammar as a k8s name (see validate::username) — no
-    // separator character in either half that could make two different
-    // (username, name) pairs collide on the same scoped_name.
-    let scoped_name = format!("{}-{}", user.username, req.name);
-    if scoped_name.len() > 63 {
-        return Err(ApiError::BadRequest(format!(
-            "\"{scoped_name}\" (your username plus this name) is too long ({} characters, max 63) — try a shorter name",
-            scoped_name.len()
-        )));
-    }
     validate::image_ref(&req.image)?;
     if req.replicas < 0 {
         return Err(ApiError::BadRequest("replicas must not be negative".into()));
@@ -121,6 +149,20 @@ pub async fn create_deployment(
         (Some(accel_type), Some(count)) if !accel_type.trim().is_empty() && count > 0 => count * replicas,
         _ => 0,
     };
+    // No user-chosen name: <username>-<instance type>-<random>, so launching
+    // never requires picking something unique yourself. "Instance type" is
+    // the template's own name when launched from one, or a slug of the
+    // image for a Custom launch (which has no template name to use
+    // instead) — see scoped_deployment_name's own doc comment for how the
+    // pieces are trimmed to fit Kubernetes' 63-character name limit.
+    let instance_type = req
+        .template_name
+        .as_deref()
+        .map(slugify)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| image_repo_slug(&req.image));
+    let scoped_name = scoped_deployment_name(&user.username, &instance_type);
+
     // Held until the Deployment is actually created, so a concurrent launch
     // (on this replica or another) can't slip past the same quota check —
     // see AppState::lock_launches.
@@ -240,14 +282,14 @@ pub async fn create_deployment(
 
     let deployments: Api<Deployment> = Api::namespaced(state.client.clone(), &state.namespace);
     let created = deployments.create(&PostParams::default(), &deployment).await.map_err(|err| {
-        // The actual object name is scoped by username, so a 409 here means
-        // this exact user already has a deployment by this exact name —
-        // not a clash with anyone else's.
+        // The name includes a random suffix, so a 409 here would mean that
+        // exact suffix collided for this exact user and instance type — a
+        // one-in-billions coincidence worth surfacing plainly rather than
+        // as a raw API-server error if it somehow happens.
         match &err {
-            kube::Error::Api(status) if status.code == 409 => ApiError::BadRequest(format!(
-                "you already have a deployment named \"{}\" — pick another name",
-                req.name
-            )),
+            kube::Error::Api(status) if status.code == 409 => {
+                ApiError::BadRequest(format!("\"{scoped_name}\" already exists — this should be extremely rare; try again"))
+            }
             _ => ApiError::from(err),
         }
     })?;
@@ -681,4 +723,49 @@ pub async fn delete_deployment(
 
     sqlx::query("DELETE FROM deployment_secrets WHERE deployment_name = $1").bind(&name).execute(&state.pg).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slugify_collapses_and_trims_non_alphanumerics() {
+        assert_eq!(slugify("JupyterLab"), "jupyterlab");
+        assert_eq!(slugify("vLLM"), "vllm");
+        assert_eq!(slugify("My Cool App!!"), "my-cool-app");
+        assert_eq!(slugify("--leading-and-trailing--"), "leading-and-trailing");
+        assert_eq!(slugify(""), "");
+    }
+
+    #[test]
+    fn image_repo_slug_strips_registry_org_tag_and_digest() {
+        assert_eq!(image_repo_slug("nginx:alpine"), "nginx");
+        assert_eq!(image_repo_slug("jupyter/base-notebook"), "base-notebook");
+        assert_eq!(image_repo_slug("ctr.int.example.com:8443/aether/aether:v1"), "aether");
+        assert_eq!(image_repo_slug("gcr.io/distroless/cc-debian12:nonroot"), "cc-debian12");
+        assert_eq!(image_repo_slug("nginx@sha256:abcd1234"), "nginx");
+        // A pathological image string that slugifies to nothing still
+        // produces a valid, non-empty instance type.
+        assert_eq!(image_repo_slug("---"), "app");
+    }
+
+    #[test]
+    fn scoped_deployment_name_has_the_right_shape() {
+        let name = scoped_deployment_name("alice", "jupyterlab");
+        assert!(name.starts_with("alice-jupyterlab-"), "{name}");
+        assert_eq!(name.len(), "alice-jupyterlab-".len() + 6);
+        // Different calls get different random suffixes.
+        let other = scoped_deployment_name("alice", "jupyterlab");
+        assert_ne!(name, other);
+    }
+
+    #[test]
+    fn scoped_deployment_name_truncates_instance_type_to_fit_63_chars() {
+        let username = "a".repeat(32);
+        let instance_type = "b".repeat(100);
+        let name = scoped_deployment_name(&username, &instance_type);
+        assert!(name.len() <= 63, "{} chars: {name}", name.len());
+        assert!(name.starts_with(&format!("{username}-")));
+    }
 }
