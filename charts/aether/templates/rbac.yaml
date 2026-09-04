@@ -36,6 +36,17 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["create", "get", "delete"]
+  # Launch/Templates forms' storage-mount fields: `list` backs GET
+  # /api/pvcs (any logged-in user, matches the Images catalog's visibility
+  # level); `get` confirms a claim named in a launch request actually
+  # exists before creating the Deployment, so a typo fails fast with a
+  # clear 400 instead of leaving the pod stuck Pending. Read-only — Aether
+  # never creates or deletes a PersistentVolumeClaim itself; one is always
+  # provisioned out-of-band first, same as the ollama-models PVC this was
+  # modeled on.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

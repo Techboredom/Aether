@@ -2,15 +2,16 @@ use std::collections::BTreeMap;
 
 use axum::extract::{Path, State};
 use axum::Json;
-use common::{CreateDeploymentRequest, CreateDeploymentResponse, DeploymentDetail, LaunchLogEntry, Role, UpdateDeploymentRequest};
+use common::{CreateDeploymentRequest, CreateDeploymentResponse, DeploymentDetail, LaunchLogEntry, PvcEntry, Role, UpdateDeploymentRequest};
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
-    Container, EnvVar, PodSpec, PodTemplateSpec, ResourceRequirements, Service, ServicePort, ServiceSpec,
+    Container, EnvVar, PersistentVolumeClaim, PersistentVolumeClaimVolumeSource, PodSpec, PodTemplateSpec,
+    ResourceRequirements, Service, ServicePort, ServiceSpec, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use kube::api::{Api, DeleteParams, PostParams};
+use kube::api::{Api, DeleteParams, ListParams, PostParams};
 use sqlx::types::Json as SqlxJson;
 use sqlx::FromRow;
 
@@ -141,6 +142,21 @@ pub async fn create_deployment(
     if req.enable_proxy && req.container_port.is_none() {
         return Err(ApiError::BadRequest("enable_proxy requires container_port".into()));
     }
+    validate::optional_text("model", req.model.as_deref().unwrap_or(""), 500)?;
+    validate::volume_mount(req.volume_claim_name.as_deref().unwrap_or(""), req.volume_mount_path.as_deref().unwrap_or(""))?;
+    if let Some(claim_name) = &req.volume_claim_name {
+        // Shape was already checked above; this confirms it's real, so a
+        // typo'd claim name fails fast with a clear 400 instead of leaving
+        // the pod stuck Pending with nothing but a mount-failure event to
+        // explain why.
+        let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(state.client.clone(), &state.namespace);
+        pvcs.get(claim_name).await.map_err(|err| match &err {
+            kube::Error::Api(status) if status.code == 404 => {
+                ApiError::BadRequest(format!("no PersistentVolumeClaim named \"{claim_name}\" in this namespace"))
+            }
+            _ => ApiError::from(err),
+        })?;
+    }
 
     let global_settings = quota::load_global_settings(&state.pg).await?;
     quota::check_image_allowed(&state, &user, &req.image, &global_settings).await?;
@@ -222,17 +238,55 @@ pub async fn create_deployment(
         env.push(EnvVar { name: key.clone(), value: Some(value.clone()), ..Default::default() });
         value
     });
-    // "{{name}}" is a generic placeholder any template's args can use to refer
-    // to the deployment's own (user-chosen) name, e.g. JupyterLab's
-    // `--ServerApp.base_url=/proxy/{{name}}/`.
+    // "{{name}}" refers to the deployment's own generated name, e.g.
+    // JupyterLab's `--ServerApp.base_url=/proxy/{{name}}/`. "{{model}}" is
+    // req.model (a Hugging Face ID or a path under volume_mount_path below —
+    // just a string either way). "{{accelerator_count}}" is however many
+    // GPUs were actually requested (defaulting to 1 if none were, so a
+    // template whose args always reference it - e.g. vLLM's
+    // --tensor-parallel-size - doesn't end up with a nonsensical 0).
+    let model = req.model.clone().unwrap_or_default();
+    let accelerator_count_str = req.accelerator_count.filter(|&c| c > 0).unwrap_or(1).to_string();
     let args: Vec<String> = req
         .args
         .iter()
-        .map(|a| a.trim().replace("{{name}}", &scoped_name))
+        .map(|a| {
+            a.trim()
+                .replace("{{name}}", &scoped_name)
+                .replace("{{model}}", &model)
+                .replace("{{accelerator_count}}", &accelerator_count_str)
+        })
         .filter(|a| !a.is_empty())
         .collect();
     // `args` gets moved into the Container below; keep a copy for launch_log.
     let logged_args = args.clone();
+
+    // Mounts an existing PersistentVolumeClaim (already confirmed to exist,
+    // above) into the container — e.g. a shared model cache, so `model`
+    // above can be a local path instead of always re-downloading from
+    // Hugging Face. `None` (no volume_claim_name) means neither field is
+    // set at all, not empty Vecs, since an empty `volumes: []` vs. an
+    // absent field can render differently depending on the API server
+    // version and this is simpler to reason about either way.
+    let (volumes, volume_mounts) = match &req.volume_claim_name {
+        Some(claim_name) => (
+            Some(vec![Volume {
+                name: "data".to_string(),
+                persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                    claim_name: claim_name.clone(),
+                    read_only: Some(false),
+                }),
+                ..Default::default()
+            }]),
+            Some(vec![VolumeMount {
+                name: "data".to_string(),
+                mount_path: req.volume_mount_path.clone().unwrap_or_default(),
+                sub_path: req.volume_sub_path.clone().filter(|s| !s.is_empty()),
+                ..Default::default()
+            }]),
+        ),
+        None => (None, None),
+    };
 
     // The selector must stay a fixed, minimal set of labels the pod template
     // always carries; `owner` rides along as an extra descriptive label on
@@ -263,6 +317,7 @@ pub async fn create_deployment(
                 }),
                 spec: Some(PodSpec {
                     node_selector: node_selector_for(&user),
+                    volumes,
                     containers: vec![Container {
                         name: scoped_name.clone(),
                         image: Some(req.image.clone()),
@@ -273,6 +328,7 @@ pub async fn create_deployment(
                         }),
                         env: (!env.is_empty()).then_some(env),
                         args: (!args.is_empty()).then_some(args),
+                        volume_mounts,
                         ..Default::default()
                     }],
                     ..Default::default()
@@ -726,6 +782,26 @@ pub async fn delete_deployment(
 
     sqlx::query("DELETE FROM deployment_secrets WHERE deployment_name = $1").bind(&name).execute(&state.pg).await?;
     Ok(())
+}
+
+/// Existing PersistentVolumeClaims in the watched namespace, for the
+/// Launch/Templates forms' storage-mount fields. Any logged-in user (same
+/// visibility level as the Images catalog) — this only lists claims that
+/// already exist; Aether never creates or deletes one.
+pub async fn list_pvcs(_user: CurrentUser, State(state): State<AppState>) -> Result<Json<Vec<PvcEntry>>, ApiError> {
+    let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(state.client.clone(), &state.namespace);
+    let list = pvcs.list(&ListParams::default()).await?;
+    let entries: Vec<PvcEntry> = list
+        .items
+        .into_iter()
+        .filter_map(|pvc| {
+            let name = pvc.metadata.name?;
+            let capacity =
+                pvc.status.and_then(|s| s.capacity).and_then(|c| c.get("storage").cloned()).map(|Quantity(v)| v);
+            Some(PvcEntry { name, capacity })
+        })
+        .collect();
+    Ok(Json(entries))
 }
 
 #[cfg(test)]

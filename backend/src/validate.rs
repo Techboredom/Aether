@@ -22,6 +22,43 @@ pub fn k8s_name(field: &str, value: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// An optional free-text value (a `{{model}}` substitution: a Hugging Face
+/// model ID or a filesystem path) — empty is valid (means "unused"), but
+/// anything present is bounded and control-character-free, same spirit as
+/// `label` below without the "must not be empty" rule.
+pub fn optional_text(field: &str, value: &str, max_len: usize) -> Result<(), ApiError> {
+    let trimmed = value.trim();
+    if trimmed.chars().count() > max_len {
+        return Err(bad(field, &format!("must be at most {max_len} characters")));
+    }
+    if trimmed.chars().any(|c| c.is_control()) {
+        return Err(bad(field, "must not contain control characters"));
+    }
+    Ok(())
+}
+
+/// A volume mount referencing an existing `PersistentVolumeClaim`:
+/// `claim_name`/`mount_path` must both be set or both be blank — a volume
+/// with nowhere to mount it, or a mount path with no claim backing it, is
+/// never meaningful. Only checks shape here; whether `claim_name` actually
+/// exists in the namespace is checked against the live cluster at launch
+/// time, not here.
+pub fn volume_mount(claim_name: &str, mount_path: &str) -> Result<(), ApiError> {
+    let claim_name = claim_name.trim();
+    let mount_path = mount_path.trim();
+    if claim_name.is_empty() && mount_path.is_empty() {
+        return Ok(());
+    }
+    if claim_name.is_empty() || mount_path.is_empty() {
+        return Err(bad("volume", "volume_claim_name and volume_mount_path must both be set, or both left blank"));
+    }
+    k8s_name("volume_claim_name", claim_name)?;
+    if !mount_path.starts_with('/') {
+        return Err(bad("volume_mount_path", "must be an absolute path"));
+    }
+    Ok(())
+}
+
 /// A display label (template name, username): just guards against empty/huge/
 /// control-character input, not a strict k8s naming scheme.
 pub fn label(field: &str, value: &str, max_len: usize) -> Result<(), ApiError> {
@@ -280,6 +317,24 @@ mod tests {
         assert!(!is_ok(image_ref("")));
         assert!(!is_ok(image_ref("nginx alpine")));
         assert!(!is_ok(image_ref("nginx\nalpine")));
+    }
+
+    #[test]
+    fn optional_text_accepts_blank_but_bounds_and_checks_the_rest() {
+        assert!(is_ok(optional_text("model", "", 10)));
+        assert!(is_ok(optional_text("model", "meta-llama/Llama-3-8B", 500)));
+        assert!(!is_ok(optional_text("model", &"x".repeat(11), 10)));
+        assert!(!is_ok(optional_text("model", "bad\ntext", 500)));
+    }
+
+    #[test]
+    fn volume_mount_requires_both_fields_or_neither() {
+        assert!(is_ok(volume_mount("", "")));
+        assert!(is_ok(volume_mount("models", "/mnt/models")));
+        assert!(!is_ok(volume_mount("models", "")));
+        assert!(!is_ok(volume_mount("", "/mnt/models")));
+        assert!(!is_ok(volume_mount("Bad_Name", "/mnt/models")), "claim name must be a valid k8s name");
+        assert!(!is_ok(volume_mount("models", "relative/path")), "mount path must be absolute");
     }
 
     #[test]

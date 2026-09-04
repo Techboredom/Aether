@@ -151,6 +151,7 @@ async fn main() -> anyhow::Result<()> {
             get(deployments::get_deployment).put(deployments::update_deployment).delete(deployments::delete_deployment),
         )
         .route("/api/launches", get(deployments::list_launches))
+        .route("/api/pvcs", get(deployments::list_pvcs))
         .route("/api/quota/me", get(quota::my_quota))
         .route("/api/quota/settings", get(quota::get_settings).put(quota::update_settings))
         .route("/api/quota/users", get(quota::list_user_quotas))

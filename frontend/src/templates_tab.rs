@@ -1,4 +1,4 @@
-use common::{SaveTemplateRequest, TemplateEntry};
+use common::{PvcEntry, SaveTemplateRequest, TemplateEntry};
 use leptos::prelude::*;
 use leptos::tachys::dom::{event_target_checked, event_target_value};
 use leptos::task::spawn_local;
@@ -26,6 +26,11 @@ pub fn TemplatesTab() -> impl IntoView {
     let accelerator_count = RwSignal::new(String::new());
     let env_vars = EnvVars::new();
     let args_text = RwSignal::new(String::new());
+    let model = RwSignal::new(String::new());
+    let volume_claim_name = RwSignal::new(String::new());
+    let volume_mount_path = RwSignal::new(String::new());
+    let volume_sub_path = RwSignal::new(String::new());
+    let pvcs: RwSignal<Vec<PvcEntry>> = RwSignal::new(Vec::new());
     let notes_text = RwSignal::new(String::new());
     let secret_env_key = RwSignal::new(String::new());
     let proxy_enabled = RwSignal::new(false);
@@ -49,6 +54,12 @@ pub fn TemplatesTab() -> impl IntoView {
     };
     refresh();
 
+    spawn_local(async move {
+        if let Ok(list) = api::get_json::<Vec<PvcEntry>>("/api/pvcs").await {
+            pvcs.set(list);
+        }
+    });
+
     let clear_form = move || {
         editing_id.set(None);
         name.set(String::new());
@@ -62,6 +73,10 @@ pub fn TemplatesTab() -> impl IntoView {
         accelerator_count.set(String::new());
         env_vars.set_from(&[]);
         args_text.set(String::new());
+        model.set(String::new());
+        volume_claim_name.set(String::new());
+        volume_mount_path.set(String::new());
+        volume_sub_path.set(String::new());
         notes_text.set(String::new());
         secret_env_key.set(String::new());
         proxy_enabled.set(false);
@@ -82,6 +97,10 @@ pub fn TemplatesTab() -> impl IntoView {
         accelerator_count.set(t.accelerator_count.map(|c| c.to_string()).unwrap_or_default());
         env_vars.set_from(&t.env);
         args_text.set(t.args.join("\n"));
+        model.set(t.model.clone());
+        volume_claim_name.set(t.volume_claim_name.clone());
+        volume_mount_path.set(t.volume_mount_path.clone());
+        volume_sub_path.set(t.volume_sub_path.clone());
         notes_text.set(t.notes.clone());
         secret_env_key.set(t.secret_env_key.clone().unwrap_or_default());
         proxy_enabled.set(t.proxy_enabled);
@@ -132,6 +151,10 @@ pub fn TemplatesTab() -> impl IntoView {
             accelerator_count: accel_count,
             env: env_vars.to_pairs(),
             args,
+            model: model.get().trim().to_string(),
+            volume_claim_name: volume_claim_name.get().trim().to_string(),
+            volume_mount_path: volume_mount_path.get().trim().to_string(),
+            volume_sub_path: volume_sub_path.get().trim().to_string(),
             notes: notes_text.get(),
             secret_env_key: {
                 let key = secret_env_key.get().trim().to_string();
@@ -331,13 +354,68 @@ pub fn TemplatesTab() -> impl IntoView {
                 </fieldset>
 
                 <label>
+                    "Model (optional)"
+                    <input
+                        type="text"
+                        maxlength="500"
+                        placeholder="e.g. meta-llama/Llama-3-8B, or a local path under the mount below"
+                        prop:value=move || model.get()
+                        on:input=move |ev| model.set(event_target_value(&ev))
+                    />
+                </label>
+
+                <fieldset>
+                    <legend>"Storage mount (optional)"</legend>
+                    <label>
+                        "Existing PersistentVolumeClaim"
+                        <input
+                            type="text"
+                            list="pvc-catalog"
+                            maxlength="63"
+                            placeholder="e.g. ollama-models"
+                            prop:value=move || volume_claim_name.get()
+                            on:input=move |ev| volume_claim_name.set(event_target_value(&ev))
+                        />
+                        <datalist id="pvc-catalog">
+                            <For each=move || pvcs.get() key=|p| p.name.clone() let(p)>
+                                <option value=p.name.clone()>{p.capacity.clone().unwrap_or_default()}</option>
+                            </For>
+                        </datalist>
+                    </label>
+                    <label>
+                        "Mount path"
+                        <input
+                            type="text"
+                            maxlength="512"
+                            placeholder="e.g. /mnt/models"
+                            disabled=move || volume_claim_name.get().trim().is_empty()
+                            prop:value=move || volume_mount_path.get()
+                            on:input=move |ev| volume_mount_path.set(event_target_value(&ev))
+                        />
+                    </label>
+                    <label>
+                        "Subpath within the claim (optional)"
+                        <input
+                            type="text"
+                            maxlength="512"
+                            disabled=move || volume_claim_name.get().trim().is_empty()
+                            prop:value=move || volume_sub_path.get()
+                            on:input=move |ev| volume_sub_path.set(event_target_value(&ev))
+                        />
+                    </label>
+                </fieldset>
+
+                <label>
                     "Command arguments (optional, one per line)"
                     <textarea
                         rows="2"
-                        placeholder="--model=<huggingface-model-id>"
+                        placeholder="--tensor-parallel-size={{accelerator_count}}"
                         prop:value=move || args_text.get()
                         on:input=move |ev| args_text.set(event_target_value(&ev))
                     ></textarea>
+                    <div class="hint">
+                        "\"{{name}}\" is this deployment's own generated name, \"{{model}}\" is the Model field above, and \"{{accelerator_count}}\" is however many accelerators were requested (defaults to 1)."
+                    </div>
                 </label>
 
                 <label>

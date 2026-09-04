@@ -119,9 +119,33 @@ pub struct CreateDeploymentRequest {
     /// logged at startup) still applies unless a value is explicitly set.
     #[serde(default)]
     pub env: Vec<(String, String)>,
-    /// Extra container command-line arguments (e.g. `--model=...` for vLLM/SGLang).
+    /// Extra container command-line arguments. `{{name}}` is substituted with
+    /// the deployment's own auto-generated name, `{{model}}` with `model`
+    /// below, and `{{accelerator_count}}` with `accelerator_count` above
+    /// (defaulting to 1 if unset) — e.g. vLLM's
+    /// `--tensor-parallel-size={{accelerator_count}}`.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Substituted for the literal string `{{model}}` in `args` — see
+    /// `SaveTemplateRequest::model`. A Hugging Face model ID and a local
+    /// path under `volume_mount_path` below both just substitute in as a
+    /// plain string; nothing here distinguishes the two.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Name of an existing `PersistentVolumeClaim` (provisioned out-of-band
+    /// — Aether never creates one itself, e.g. a shared model cache) to
+    /// mount into the container. Requires `volume_mount_path`; rejected
+    /// with 400 if no such claim exists in the namespace.
+    #[serde(default)]
+    pub volume_claim_name: Option<String>,
+    /// Where to mount `volume_claim_name` inside the container. Required
+    /// if `volume_claim_name` is set, meaningless otherwise.
+    #[serde(default)]
+    pub volume_mount_path: Option<String>,
+    /// Mounts only this subdirectory of the claim rather than its root.
+    /// Optional even when `volume_claim_name`/`volume_mount_path` are set.
+    #[serde(default)]
+    pub volume_sub_path: Option<String>,
     /// If set, the backend generates a random value and sets it as this env
     /// var (overriding any same-keyed entry in `env`), instead of the user
     /// typing one in — e.g. `"JUPYTER_TOKEN"`. Comes from the selected
@@ -242,6 +266,16 @@ pub struct TemplateEntry {
     /// fill in — see `CreateDeploymentRequest::env`.
     pub env: Vec<(String, String)>,
     pub args: Vec<String>,
+    /// Substituted for `{{model}}` in `args` at launch time — see
+    /// `CreateDeploymentRequest::model`. Empty means this template doesn't
+    /// use the placeholder.
+    pub model: String,
+    /// Name of an existing PersistentVolumeClaim to mount, or empty for
+    /// none. Set together with `volume_mount_path`, or not at all.
+    pub volume_claim_name: String,
+    pub volume_mount_path: String,
+    /// Optional even when the two above are set.
+    pub volume_sub_path: String,
     pub notes: String,
     /// If set, launching this template generates a random value for this env
     /// var automatically instead of showing it as an editable field — e.g.
@@ -276,11 +310,25 @@ pub struct SaveTemplateRequest {
     pub accelerator_count: Option<i64>,
     pub env: Vec<(String, String)>,
     pub args: Vec<String>,
+    pub model: String,
+    pub volume_claim_name: String,
+    pub volume_mount_path: String,
+    pub volume_sub_path: String,
     pub notes: String,
     pub secret_env_key: Option<String>,
     pub proxy_enabled: bool,
     pub strip_prefix: bool,
     pub public_service: bool,
+}
+
+/// An existing `PersistentVolumeClaim` in the watched namespace, for the
+/// Launch/Templates forms' storage-mount fields — `GET /api/pvcs`, any
+/// logged-in user (matches the Images catalog's visibility level).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PvcEntry {
+    pub name: String,
+    /// e.g. "2Ti" — `None` if the claim isn't Bound yet.
+    pub capacity: Option<String>,
 }
 
 /// The two account classes. Admins can manage templates and accounts; both
