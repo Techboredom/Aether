@@ -36,6 +36,9 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
     let model = RwSignal::new(String::new());
     let context_length = RwSignal::new(String::new());
     let quantization = RwSignal::new(String::new());
+    let served_model_name = RwSignal::new(String::new());
+    let gpu_memory_utilization = RwSignal::new(String::new());
+    let dtype = RwSignal::new(String::new());
     let volume_claim_name = RwSignal::new(String::new());
     let volume_mount_path = RwSignal::new(String::new());
     let volume_sub_path = RwSignal::new(String::new());
@@ -109,6 +112,9 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
         model.set(t.model.clone());
         context_length.set(t.context_length.map(|n| n.to_string()).unwrap_or_default());
         quantization.set(t.quantization.clone());
+        served_model_name.set(t.served_model_name.clone());
+        gpu_memory_utilization.set(t.gpu_memory_utilization.map(|f| f.to_string()).unwrap_or_default());
+        dtype.set(t.dtype.clone());
         volume_claim_name.set(t.volume_claim_name.clone());
         volume_mount_path.set(t.volume_mount_path.clone());
         volume_sub_path.set(t.volume_sub_path.clone());
@@ -134,6 +140,9 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
         model.set(String::new());
         context_length.set(String::new());
         quantization.set(String::new());
+        served_model_name.set(String::new());
+        gpu_memory_utilization.set(String::new());
+        dtype.set(String::new());
         volume_claim_name.set(String::new());
         volume_mount_path.set(String::new());
         volume_sub_path.set(String::new());
@@ -186,6 +195,9 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
             model: non_empty(model.get()),
             context_length: context_length.get().trim().parse().ok(),
             quantization: non_empty(quantization.get()),
+            served_model_name: non_empty(served_model_name.get()),
+            gpu_memory_utilization: gpu_memory_utilization.get().trim().parse().ok(),
+            dtype: non_empty(dtype.get()),
             volume_claim_name: non_empty(volume_claim_name.get()),
             volume_mount_path: non_empty(volume_mount_path.get()),
             volume_sub_path: non_empty(volume_sub_path.get()),
@@ -423,6 +435,41 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
                     />
                 </label>
 
+                <label>
+                    "Served model name (optional)"
+                    <input
+                        type="text"
+                        maxlength="200"
+                        placeholder="a short name for the OpenAI-compatible API, if different from Model"
+                        prop:value=move || served_model_name.get()
+                        on:input=move |ev| served_model_name.set(event_target_value(&ev))
+                    />
+                </label>
+
+                <label>
+                    "GPU memory utilization (optional)"
+                    <input
+                        type="number"
+                        min="0.01"
+                        max="1"
+                        step="0.01"
+                        placeholder="e.g. 0.9 — fraction of GPU memory to reserve"
+                        prop:value=move || gpu_memory_utilization.get()
+                        on:input=move |ev| gpu_memory_utilization.set(event_target_value(&ev))
+                    />
+                </label>
+
+                <label>
+                    "Dtype (optional)"
+                    <input
+                        type="text"
+                        maxlength="50"
+                        placeholder="e.g. float16, bfloat16, auto"
+                        prop:value=move || dtype.get()
+                        on:input=move |ev| dtype.set(event_target_value(&ev))
+                    />
+                </label>
+
                 <fieldset>
                     <legend>"Storage mount (optional)"</legend>
                     <label>
@@ -473,7 +520,7 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
                         on:input=move |ev| args_text.set(event_target_value(&ev))
                     ></textarea>
                     <div class="hint">
-                        "\"{{name}}\" is this deployment's own generated name, \"{{accelerator_count}}\" is the Accelerator count above (defaults to 1), and \"{{model}}\"/\"{{context_length}}\"/\"{{quantization}}\" are the fields above — a line referencing one of those three is dropped entirely if left blank, rather than sending a broken flag."
+                        "\"{{name}}\" is this deployment's own generated name, \"{{accelerator_count}}\" is the Accelerator count above (defaults to 1), and \"{{model}}\"/\"{{context_length}}\"/\"{{quantization}}\"/\"{{served_model_name}}\"/\"{{gpu_memory_utilization}}\"/\"{{dtype}}\" are the fields above — a line referencing one of those six is dropped entirely if left blank, rather than sending a broken flag."
                     </div>
                 </label>
 

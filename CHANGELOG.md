@@ -24,22 +24,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   server-side (`POST /api/deployments` 400s otherwise), with the Launch
   tab hiding the "Custom" option and disabling image editing to match.
   Admins are always exempt.
-- Dedicated **Model**, **context length**, and **quantization** fields
+- Dedicated **Model**, **context length**, **quantization**,
+  **served model name**, **GPU memory utilization**, and **dtype** fields
   (Launch and Templates forms), substituted for `{{model}}`,
-  `{{context_length}}`, and `{{quantization}}` in `args` — pull the flags
+  `{{context_length}}`, `{{quantization}}`, `{{served_model_name}}`,
+  `{{gpu_memory_utilization}}`, and `{{dtype}}` in `args` — pull the flags
   every LLM-serving template actually needs edited (vLLM's `--model`/
-  `--max-model-len`/`--quantization`, SGLang's equivalents) out of the
+  `--max-model-len`/`--quantization`/`--served-model-name`/
+  `--gpu-memory-utilization`/`--dtype`, SGLang's equivalents) out of the
   free-text args box. `model` works identically for a Hugging Face model
-  ID or a local path under a storage mount (below). All three are
-  genuinely optional: an `args` line referencing one of them is dropped
-  entirely if that field is left blank, instead of substituting an empty
-  value and sending a broken `--flag=` with nothing after the `=`.
+  ID or a local path under a storage mount (below); `gpu_memory_utilization`
+  is validated to `(0.0, 1.0]`. All six are genuinely optional: an `args`
+  line referencing one of them is dropped entirely if that field is left
+  blank, instead of substituting an empty value and sending a broken
+  `--flag=` with nothing after the `=`.
 - A new `{{accelerator_count}}` args placeholder, so tensor parallelism
   (or any other flag that should track GPU count) matches whatever was
   actually requested instead of needing a second number kept in sync by
   hand — defaults to `1` if no accelerator was requested, and (unlike the
-  three above) never dropped. vLLM/SGLang's seeded templates now use all
-  four placeholders instead of a hand-edited placeholder string.
+  six above) never dropped. vLLM/SGLang's seeded templates now use all
+  seven placeholders instead of a hand-edited placeholder string.
 - A storage mount for launches/templates: `volume_claim_name` +
   `volume_mount_path` (+ optional `volume_sub_path`) mount an *existing*
   `PersistentVolumeClaim` into the container — e.g. a shared model cache,

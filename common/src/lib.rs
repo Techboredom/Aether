@@ -123,13 +123,14 @@ pub struct CreateDeploymentRequest {
     /// substituted with the deployment's own auto-generated name, and
     /// `{{accelerator_count}}` with `accelerator_count` above (defaulting to
     /// `1` if unset) — e.g. vLLM's `--tensor-parallel-size={{accelerator_count}}`.
-    /// `{{model}}`, `{{context_length}}`, and `{{quantization}}` (below) are
-    /// each substituted the same way *if set* — but if the corresponding
-    /// field is unset, the whole line containing that placeholder is
-    /// dropped entirely, rather than substituting an empty value and
-    /// sending a broken `--flag=` with nothing after the `=`. This lets a
-    /// template's args always list an optional flag on its own line and
-    /// have it just not appear when that field is left blank.
+    /// `{{model}}`, `{{context_length}}`, `{{quantization}}`,
+    /// `{{served_model_name}}`, `{{gpu_memory_utilization}}`, and
+    /// `{{dtype}}` (all below) are each substituted the same way *if set* —
+    /// but if the corresponding field is unset, the whole line containing
+    /// that placeholder is dropped entirely, rather than substituting an
+    /// empty value and sending a broken `--flag=` with nothing after the
+    /// `=`. This lets a template's args always list an optional flag on its
+    /// own line and have it just not appear when that field is left blank.
     #[serde(default)]
     pub args: Vec<String>,
     /// Substituted for `{{model}}` in `args` — see `SaveTemplateRequest::model`.
@@ -147,6 +148,20 @@ pub struct CreateDeploymentRequest {
     /// no single fixed set of methods across engines/versions.
     #[serde(default)]
     pub quantization: Option<String>,
+    /// Substituted for `{{served_model_name}}` in `args` — the name exposed
+    /// via the OpenAI-compatible API, separate from `model` above (which is
+    /// often a long, ugly Hugging Face ID).
+    #[serde(default)]
+    pub served_model_name: Option<String>,
+    /// Substituted for `{{gpu_memory_utilization}}` in `args` — the
+    /// fraction of GPU memory one instance reserves (vLLM defaults this to
+    /// `0.9` on its own if never set). Must be in `(0.0, 1.0]` if set.
+    #[serde(default)]
+    pub gpu_memory_utilization: Option<f64>,
+    /// Substituted for `{{dtype}}` in `args` — e.g. `"float16"`,
+    /// `"bfloat16"`, `"auto"`. Free text, same reasoning as `quantization`.
+    #[serde(default)]
+    pub dtype: Option<String>,
     /// Name of an existing `PersistentVolumeClaim` (provisioned out-of-band
     /// — Aether never creates one itself, e.g. a shared model cache) to
     /// mount into the container. Requires `volume_mount_path`; rejected
@@ -289,6 +304,12 @@ pub struct TemplateEntry {
     pub context_length: Option<i64>,
     /// Substituted for `{{quantization}}` — see `CreateDeploymentRequest::quantization`.
     pub quantization: String,
+    /// Substituted for `{{served_model_name}}` — see `CreateDeploymentRequest::served_model_name`.
+    pub served_model_name: String,
+    /// Substituted for `{{gpu_memory_utilization}}` — see `CreateDeploymentRequest::gpu_memory_utilization`.
+    pub gpu_memory_utilization: Option<f64>,
+    /// Substituted for `{{dtype}}` — see `CreateDeploymentRequest::dtype`.
+    pub dtype: String,
     /// Name of an existing PersistentVolumeClaim to mount, or empty for
     /// none. Set together with `volume_mount_path`, or not at all.
     pub volume_claim_name: String,
@@ -332,6 +353,9 @@ pub struct SaveTemplateRequest {
     pub model: String,
     pub context_length: Option<i64>,
     pub quantization: String,
+    pub served_model_name: String,
+    pub gpu_memory_utilization: Option<f64>,
+    pub dtype: String,
     pub volume_claim_name: String,
     pub volume_mount_path: String,
     pub volume_sub_path: String,
