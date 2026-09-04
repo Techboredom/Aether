@@ -279,7 +279,7 @@ mod tests {
         for label in [
             "node-type=cpu",
             "accelerator=amd",
-            "kubernetes.io/hostname=cobalt-gpu01",
+            "kubernetes.io/hostname=node-gpu01",
             "nvidia.com/gpu.product=H100",
             "empty-value=",
         ] {

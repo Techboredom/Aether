@@ -20,12 +20,12 @@ use tokio::sync::{broadcast, Mutex, MutexGuard, RwLock};
 /// development.
 #[derive(Clone, Debug)]
 pub struct ProxyOrigin {
-    /// Where the app itself is served, e.g. `https://aether.int.techboredom.com`.
+    /// Where the app itself is served, e.g. `https://aether.example.com`.
     /// Used to send an unauthenticated proxy origin back somewhere the
     /// caller's session cookie actually exists.
     pub app_origin: String,
-    /// e.g. `proxy.aether.int.techboredom.com`, so a deployment named `foo`
-    /// is served at `foo.proxy.aether.int.techboredom.com`.
+    /// e.g. `proxy.aether.example.com`, so a deployment named `foo`
+    /// is served at `foo.proxy.aether.example.com`.
     pub base_domain: String,
 }
 
@@ -289,19 +289,19 @@ mod tests {
 
     fn origin() -> ProxyOrigin {
         ProxyOrigin {
-            app_origin: "https://aether.int.techboredom.com".to_string(),
-            base_domain: "proxy.aether.int.techboredom.com".to_string(),
+            app_origin: "https://aether.example.com".to_string(),
+            base_domain: "proxy.aether.example.com".to_string(),
         }
     }
 
     #[test]
     fn maps_a_single_label_host_to_its_deployment() {
         let o = origin();
-        assert_eq!(o.deployment_for_host("foo.proxy.aether.int.techboredom.com"), Some("foo".to_string()));
+        assert_eq!(o.deployment_for_host("foo.proxy.aether.example.com"), Some("foo".to_string()));
         // A port is part of the Host header but not of the name.
-        assert_eq!(o.deployment_for_host("foo.proxy.aether.int.techboredom.com:8443"), Some("foo".to_string()));
+        assert_eq!(o.deployment_for_host("foo.proxy.aether.example.com:8443"), Some("foo".to_string()));
         // Trailing dot is a legal absolute FQDN.
-        assert_eq!(o.deployment_for_host("foo.proxy.aether.int.techboredom.com."), Some("foo".to_string()));
+        assert_eq!(o.deployment_for_host("foo.proxy.aether.example.com."), Some("foo".to_string()));
     }
 
     #[test]
@@ -309,8 +309,8 @@ mod tests {
         let o = origin();
         // The attacker-registered lookalike: suffix matches, but it is a
         // different domain entirely.
-        assert_eq!(o.deployment_for_host("evilproxy.aether.int.techboredom.com"), None);
-        assert_eq!(o.deployment_for_host("notproxy.aether.int.techboredom.com"), None);
+        assert_eq!(o.deployment_for_host("evilproxy.aether.example.com"), None);
+        assert_eq!(o.deployment_for_host("notproxy.aether.example.com"), None);
     }
 
     #[test]
@@ -318,8 +318,8 @@ mod tests {
         let o = origin();
         // Browsers already lowercase the Host header, but a non-browser
         // client sending mixed case must still match.
-        assert_eq!(o.deployment_for_host("Foo.Proxy.Aether.Int.Techboredom.Com"), Some("foo".to_string()));
-        assert_eq!(o.deployment_for_host("FOO.PROXY.AETHER.INT.TECHBOREDOM.COM"), Some("foo".to_string()));
+        assert_eq!(o.deployment_for_host("Foo.Proxy.Aether.Example.Com"), Some("foo".to_string()));
+        assert_eq!(o.deployment_for_host("FOO.PROXY.AETHER.EXAMPLE.COM"), Some("foo".to_string()));
     }
 
     #[test]
@@ -327,14 +327,14 @@ mod tests {
         // A wildcard cert covers one label, so anything deeper would be
         // served without a matching cert — and would let one deployment
         // shadow another's name.
-        assert_eq!(origin().deployment_for_host("a.b.proxy.aether.int.techboredom.com"), None);
+        assert_eq!(origin().deployment_for_host("a.b.proxy.aether.example.com"), None);
     }
 
     #[test]
     fn rejects_the_base_domain_and_app_origin_themselves() {
         let o = origin();
-        assert_eq!(o.deployment_for_host("proxy.aether.int.techboredom.com"), None);
-        assert_eq!(o.deployment_for_host("aether.int.techboredom.com"), None);
+        assert_eq!(o.deployment_for_host("proxy.aether.example.com"), None);
+        assert_eq!(o.deployment_for_host("aether.example.com"), None);
         assert_eq!(o.deployment_for_host("unrelated.example.com"), None);
         assert_eq!(o.deployment_for_host(""), None);
     }
@@ -342,7 +342,7 @@ mod tests {
     #[test]
     fn builds_per_deployment_origins_and_urls() {
         let o = origin();
-        assert_eq!(o.origin_for("foo"), "https://foo.proxy.aether.int.techboredom.com");
+        assert_eq!(o.origin_for("foo"), "https://foo.proxy.aether.example.com");
         assert!(o.is_https());
 
         let plain = ProxyOrigin { app_origin: "http://localhost:3000".to_string(), ..origin() };
