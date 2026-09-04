@@ -142,6 +142,9 @@ pub async fn create_deployment(
         return Err(ApiError::BadRequest("enable_proxy requires container_port".into()));
     }
 
+    let global_settings = quota::load_global_settings(&state.pg).await?;
+    quota::check_image_allowed(&state, &user, &req.image, &global_settings).await?;
+
     let replicas = i64::from(req.replicas);
     let additional_cpu = req.cpu_limit.as_deref().and_then(|v| parse_cpu_millicores(&Quantity(v.to_string()))).unwrap_or(0) * replicas;
     let additional_memory = req.memory_limit.as_deref().and_then(|v| parse_memory_bytes(&Quantity(v.to_string()))).unwrap_or(0) * replicas;
@@ -173,7 +176,7 @@ pub async fn create_deployment(
     // value stands in for whatever they would have set (which is nothing,
     // since the frontend doesn't even show the field in that mode) rather
     // than leaving it for Kubernetes to default the request to the limit.
-    let global_settings = quota::load_global_settings(&state.pg).await?;
+    // (global_settings was already loaded above, for check_image_allowed.)
     let (cpu_request, memory_request) = if global_settings.expose_resource_requests {
         (req.cpu_request.clone(), req.memory_request.clone())
     } else {

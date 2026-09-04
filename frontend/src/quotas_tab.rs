@@ -18,6 +18,7 @@ pub fn QuotasTab() -> impl IntoView {
     let expose_resource_requests = RwSignal::new(true);
     let fixed_cpu_request = RwSignal::new(String::new());
     let fixed_memory_request = RwSignal::new(String::new());
+    let allow_custom_images = RwSignal::new(true);
     let settings_saving = RwSignal::new(false);
     let settings_result: RwSignal<Option<Result<String, String>>> = RwSignal::new(None);
 
@@ -42,6 +43,7 @@ pub fn QuotasTab() -> impl IntoView {
                     expose_resource_requests.set(s.expose_resource_requests);
                     fixed_cpu_request.set(s.fixed_cpu_request.unwrap_or_default());
                     fixed_memory_request.set(s.fixed_memory_request.unwrap_or_default());
+                    allow_custom_images.set(s.allow_custom_images);
                 }
                 Err(err) => settings_error.set(Some(format!("failed to load quota settings: {err}"))),
             }
@@ -77,6 +79,7 @@ pub fn QuotasTab() -> impl IntoView {
             expose_resource_requests: expose_resource_requests.get(),
             fixed_cpu_request: non_empty(fixed_cpu_request.get()),
             fixed_memory_request: non_empty(fixed_memory_request.get()),
+            allow_custom_images: allow_custom_images.get(),
         };
         settings_saving.set(true);
         settings_result.set(None);
@@ -191,6 +194,14 @@ pub fn QuotasTab() -> impl IntoView {
                             />
                         </label>
                     </Show>
+                    <label class="checkbox">
+                        <input
+                            type="checkbox"
+                            prop:checked=move || allow_custom_images.get()
+                            on:change=move |ev| allow_custom_images.set(event_target_checked(&ev))
+                        />
+                        "Allow non-admin users to launch images outside the Images catalog and existing Templates (unchecking restricts the Launch tab's \"Custom\" option and free-text image editing to admins only)"
+                    </label>
                     <div class="form-actions">
                         <button type="submit" disabled=move || settings_saving.get()>
                             {move || if settings_saving.get() { "Saving…" } else { "Save global quota" }}

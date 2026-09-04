@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   give Kubernetes time to remove the terminating pod from Service
   endpoints (in place of a `preStop` hook, since the distroless runtime
   image has no shell to run one).
+- A new global admin setting, `allow_custom_images` (Quotas tab, default
+  `true`), restricts non-admin launches to an image already in the Images
+  catalog or an existing Template's own image when turned off — enforced
+  server-side (`POST /api/deployments` 400s otherwise), with the Launch
+  tab hiding the "Custom" option and disabling image editing to match.
+  Admins are always exempt.
 
 ### Changed
 
