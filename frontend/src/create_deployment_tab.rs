@@ -34,6 +34,8 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
     let env_vars = EnvVars::new();
     let args_text = RwSignal::new(String::new());
     let model = RwSignal::new(String::new());
+    let context_length = RwSignal::new(String::new());
+    let quantization = RwSignal::new(String::new());
     let volume_claim_name = RwSignal::new(String::new());
     let volume_mount_path = RwSignal::new(String::new());
     let volume_sub_path = RwSignal::new(String::new());
@@ -105,6 +107,8 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
         env_vars.set_from(&env);
         args_text.set(t.args.join("\n"));
         model.set(t.model.clone());
+        context_length.set(t.context_length.map(|n| n.to_string()).unwrap_or_default());
+        quantization.set(t.quantization.clone());
         volume_claim_name.set(t.volume_claim_name.clone());
         volume_mount_path.set(t.volume_mount_path.clone());
         volume_sub_path.set(t.volume_sub_path.clone());
@@ -128,6 +132,8 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
         env_vars.set_from(&[]);
         args_text.set(String::new());
         model.set(String::new());
+        context_length.set(String::new());
+        quantization.set(String::new());
         volume_claim_name.set(String::new());
         volume_mount_path.set(String::new());
         volume_sub_path.set(String::new());
@@ -178,6 +184,8 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
             env: env_vars.to_pairs(),
             args,
             model: non_empty(model.get()),
+            context_length: context_length.get().trim().parse().ok(),
+            quantization: non_empty(quantization.get()),
             volume_claim_name: non_empty(volume_claim_name.get()),
             volume_mount_path: non_empty(volume_mount_path.get()),
             volume_sub_path: non_empty(volume_sub_path.get()),
@@ -392,6 +400,29 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
                     />
                 </label>
 
+                <label>
+                    "Context length (optional)"
+                    <input
+                        type="number"
+                        min="1"
+                        step="1"
+                        placeholder="e.g. 8192"
+                        prop:value=move || context_length.get()
+                        on:input=move |ev| context_length.set(event_target_value(&ev))
+                    />
+                </label>
+
+                <label>
+                    "Quantization (optional)"
+                    <input
+                        type="text"
+                        maxlength="100"
+                        placeholder="e.g. awq, gptq, fp8"
+                        prop:value=move || quantization.get()
+                        on:input=move |ev| quantization.set(event_target_value(&ev))
+                    />
+                </label>
+
                 <fieldset>
                     <legend>"Storage mount (optional)"</legend>
                     <label>
@@ -442,7 +473,7 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
                         on:input=move |ev| args_text.set(event_target_value(&ev))
                     ></textarea>
                     <div class="hint">
-                        "\"{{name}}\" is this deployment's own generated name, \"{{model}}\" is the Model field above, and \"{{accelerator_count}}\" is the Accelerator count above (defaults to 1)."
+                        "\"{{name}}\" is this deployment's own generated name, \"{{accelerator_count}}\" is the Accelerator count above (defaults to 1), and \"{{model}}\"/\"{{context_length}}\"/\"{{quantization}}\" are the fields above — a line referencing one of those three is dropped entirely if left blank, rather than sending a broken flag."
                     </div>
                 </label>
 

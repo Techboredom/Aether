@@ -119,19 +119,34 @@ pub struct CreateDeploymentRequest {
     /// logged at startup) still applies unless a value is explicitly set.
     #[serde(default)]
     pub env: Vec<(String, String)>,
-    /// Extra container command-line arguments. `{{name}}` is substituted with
-    /// the deployment's own auto-generated name, `{{model}}` with `model`
-    /// below, and `{{accelerator_count}}` with `accelerator_count` above
-    /// (defaulting to 1 if unset) — e.g. vLLM's
-    /// `--tensor-parallel-size={{accelerator_count}}`.
+    /// Extra container command-line arguments. `{{name}}` is always
+    /// substituted with the deployment's own auto-generated name, and
+    /// `{{accelerator_count}}` with `accelerator_count` above (defaulting to
+    /// `1` if unset) — e.g. vLLM's `--tensor-parallel-size={{accelerator_count}}`.
+    /// `{{model}}`, `{{context_length}}`, and `{{quantization}}` (below) are
+    /// each substituted the same way *if set* — but if the corresponding
+    /// field is unset, the whole line containing that placeholder is
+    /// dropped entirely, rather than substituting an empty value and
+    /// sending a broken `--flag=` with nothing after the `=`. This lets a
+    /// template's args always list an optional flag on its own line and
+    /// have it just not appear when that field is left blank.
     #[serde(default)]
     pub args: Vec<String>,
-    /// Substituted for the literal string `{{model}}` in `args` — see
-    /// `SaveTemplateRequest::model`. A Hugging Face model ID and a local
-    /// path under `volume_mount_path` below both just substitute in as a
-    /// plain string; nothing here distinguishes the two.
+    /// Substituted for `{{model}}` in `args` — see `SaveTemplateRequest::model`.
+    /// A Hugging Face model ID and a local path under `volume_mount_path`
+    /// below both just substitute in as a plain string; nothing here
+    /// distinguishes the two.
     #[serde(default)]
     pub model: Option<String>,
+    /// Substituted for `{{context_length}}` in `args` — e.g. vLLM's
+    /// `--max-model-len`. A plain token count, not vLLM-specific itself.
+    #[serde(default)]
+    pub context_length: Option<i64>,
+    /// Substituted for `{{quantization}}` in `args` — e.g. vLLM's
+    /// `--quantization` (`"awq"`, `"gptq"`, `"fp8"`, ...). Free text: there's
+    /// no single fixed set of methods across engines/versions.
+    #[serde(default)]
+    pub quantization: Option<String>,
     /// Name of an existing `PersistentVolumeClaim` (provisioned out-of-band
     /// — Aether never creates one itself, e.g. a shared model cache) to
     /// mount into the container. Requires `volume_mount_path`; rejected
@@ -270,6 +285,10 @@ pub struct TemplateEntry {
     /// `CreateDeploymentRequest::model`. Empty means this template doesn't
     /// use the placeholder.
     pub model: String,
+    /// Substituted for `{{context_length}}` — see `CreateDeploymentRequest::context_length`.
+    pub context_length: Option<i64>,
+    /// Substituted for `{{quantization}}` — see `CreateDeploymentRequest::quantization`.
+    pub quantization: String,
     /// Name of an existing PersistentVolumeClaim to mount, or empty for
     /// none. Set together with `volume_mount_path`, or not at all.
     pub volume_claim_name: String,
@@ -311,6 +330,8 @@ pub struct SaveTemplateRequest {
     pub env: Vec<(String, String)>,
     pub args: Vec<String>,
     pub model: String,
+    pub context_length: Option<i64>,
+    pub quantization: String,
     pub volume_claim_name: String,
     pub volume_mount_path: String,
     pub volume_sub_path: String,
