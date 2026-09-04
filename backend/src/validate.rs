@@ -37,6 +37,22 @@ pub fn optional_text(field: &str, value: &str, max_len: usize) -> Result<(), Api
     Ok(())
 }
 
+/// An HTTP path for a readiness probe (e.g. `"/health"`) — must start with
+/// `/`, bounded, and control-character-free. Not a full URL: no scheme,
+/// host, or port, since those come from `container_port`/the pod IP instead.
+pub fn http_path(field: &str, value: &str) -> Result<(), ApiError> {
+    if !value.starts_with('/') {
+        return Err(bad(field, "must start with '/'"));
+    }
+    if value.chars().count() > 200 {
+        return Err(bad(field, "must be at most 200 characters"));
+    }
+    if value.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(bad(field, "must not contain whitespace or control characters"));
+    }
+    Ok(())
+}
+
 /// A fraction in `(0.0, 1.0]` — e.g. `gpu_memory_utilization`. `0.0` itself
 /// is rejected (nothing meaningful reserves none of the GPU); the caller
 /// only invokes this at all when the value is actually set.
@@ -335,6 +351,16 @@ mod tests {
         assert!(is_ok(optional_text("model", "meta-llama/Llama-3-8B", 500)));
         assert!(!is_ok(optional_text("model", &"x".repeat(11), 10)));
         assert!(!is_ok(optional_text("model", "bad\ntext", 500)));
+    }
+
+    #[test]
+    fn http_paths_must_start_with_a_slash_and_have_no_whitespace() {
+        assert!(is_ok(http_path("readiness_path", "/health")));
+        assert!(is_ok(http_path("readiness_path", "/")));
+        assert!(!is_ok(http_path("readiness_path", "health")));
+        assert!(!is_ok(http_path("readiness_path", "/bad path")));
+        assert!(!is_ok(http_path("readiness_path", "/bad\ttab")));
+        assert!(!is_ok(http_path("readiness_path", &format!("/{}", "x".repeat(200)))));
     }
 
     #[test]

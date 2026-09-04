@@ -42,10 +42,19 @@ rules:
   # exists before creating the Deployment, so a typo fails fast with a
   # clear 400 instead of leaving the pod stuck Pending. Read-only — Aether
   # never creates or deletes a PersistentVolumeClaim itself; one is always
-  # provisioned out-of-band first, same as the ollama-models PVC this was
-  # modeled on.
+  # provisioned out-of-band first (see charts/aether/README.md's storage
+  # notes).
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list"]
+  # The Pods tab's manage panel: "Roll back" finds the ReplicaSet from
+  # immediately before the last edit and copies its pod template back onto
+  # the Deployment — the same thing `kubectl rollout undo` does, using the
+  # revision history Kubernetes already keeps for exactly this. Read-only:
+  # Aether never creates/deletes a ReplicaSet directly, only the Deployment
+  # that owns them.
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
     verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

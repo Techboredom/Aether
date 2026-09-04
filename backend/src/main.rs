@@ -150,6 +150,9 @@ async fn main() -> anyhow::Result<()> {
             "/api/deployments/{name}",
             get(deployments::get_deployment).put(deployments::update_deployment).delete(deployments::delete_deployment),
         )
+        .route("/api/deployments/{name}/restart", post(deployments::restart_deployment))
+        .route("/api/deployments/{name}/rollback", post(deployments::rollback_deployment))
+        .route("/api/deployments/{name}/regenerate-secret", post(deployments::regenerate_secret))
         .route("/api/launches", get(deployments::list_launches))
         .route("/api/pvcs", get(deployments::list_pvcs))
         .route("/api/quota/me", get(quota::my_quota))

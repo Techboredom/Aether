@@ -64,6 +64,23 @@ pub async fn put_empty<B: Serialize>(url: &str, body: &B) -> Result<(), String> 
     if resp.ok() { Ok(()) } else { Err(error_message(resp).await) }
 }
 
+/// `POST` with no request body, decoding the response — e.g. rollback,
+/// regenerate-secret: the target is already named in the URL, nothing else
+/// to send.
+pub async fn post_empty_json<T: DeserializeOwned>(url: &str) -> Result<T, String> {
+    let resp = Request::post(url).send().await.map_err(|err| format!("request failed: {err}"))?;
+    if !resp.ok() {
+        return Err(error_message(resp).await);
+    }
+    resp.json::<T>().await.map_err(|err| format!("failed to parse response: {err}"))
+}
+
+/// `POST` with no request body and no response body — e.g. restart.
+pub async fn post_empty(url: &str) -> Result<(), String> {
+    let resp = Request::post(url).send().await.map_err(|err| format!("request failed: {err}"))?;
+    if resp.ok() { Ok(()) } else { Err(error_message(resp).await) }
+}
+
 /// `DELETE`, expecting no content back.
 pub async fn delete(url: &str) -> Result<(), String> {
     let resp = Request::delete(url).send().await.map_err(|err| format!("request failed: {err}"))?;

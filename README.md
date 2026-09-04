@@ -240,13 +240,16 @@ additionally require the `admin` role (403 otherwise).
 - `GET /ws` — WebSocket; sends a full snapshot on connect (same per-role filtering and credential enrichment as `GET /api/pods`), then `upsert`/`delete` events as pods change, filtered the same way per-connection
 - `GET /api/images` — JSON list of catalog entries from the `images` table (id, name, image, description)
 - `GET /api/templates` — JSON list of templates (any logged-in role — needed for the Launch tab's dropdown)
-- `POST /api/templates` / `PUT /api/templates/{id}` *(admin)* — create/update a template. Body is a `TemplateEntry` minus `id`: `{name, image, container_port, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, env, args, model, context_length, quantization, served_model_name, gpu_memory_utilization, dtype, volume_claim_name, volume_mount_path, volume_sub_path, notes, secret_env_key, proxy_enabled, strip_prefix, public_service}` — only `name`/`image` are required, everything else defaults to empty/`null`/`false`/`true`. `secret_env_key`, if set, is the env var name (e.g. `JUPYTER_TOKEN`) that Launch should auto-generate instead of showing as an editable field — a proxy-enabled template doesn't need one (RStudio has none). `strip_prefix` only matters when `proxy_enabled` is set (see "the reverse proxy" above). `public_service` is independent of `proxy_enabled` — set it to `false` either for a proxied app with no auth of its own (Aether's login becomes the only way in, e.g. RStudio), or for a plain internal-only service consumed from inside the cluster (e.g. an LLM engine other in-cluster tooling talks to directly, with no browser login to bypass and no proxy involved at all). `model`/`context_length`/`quantization`/`served_model_name`/`gpu_memory_utilization`/`dtype`/`volume_claim_name`/`volume_mount_path`/`volume_sub_path` are described under `POST /api/deployments` below — the template versions are just the pre-filled defaults; empty string (or `null` for `context_length`/`gpu_memory_utilization`) means unset, same convention as `cpu_request` and friends.
+- `POST /api/templates` / `PUT /api/templates/{id}` *(admin)* — create/update a template. Body is a `TemplateEntry` minus `id`: `{name, image, container_port, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, env, args, model, context_length, quantization, served_model_name, gpu_memory_utilization, dtype, volume_claim_name, volume_mount_path, volume_sub_path, notes, secret_env_key, proxy_enabled, strip_prefix, public_service, readiness_path}` — only `name`/`image` are required, everything else defaults to empty/`null`/`false`/`true`. `secret_env_key`, if set, is the env var name (e.g. `JUPYTER_TOKEN`) that Launch should auto-generate instead of showing as an editable field — a proxy-enabled template doesn't need one (RStudio has none). `strip_prefix` only matters when `proxy_enabled` is set (see "the reverse proxy" above). `public_service` is independent of `proxy_enabled` — set it to `false` either for a proxied app with no auth of its own (Aether's login becomes the only way in, e.g. RStudio), or for a plain internal-only service consumed from inside the cluster (e.g. an LLM engine other in-cluster tooling talks to directly, with no browser login to bypass and no proxy involved at all). `model`/`context_length`/`quantization`/`served_model_name`/`gpu_memory_utilization`/`dtype`/`volume_claim_name`/`volume_mount_path`/`volume_sub_path` are described under `POST /api/deployments` below — the template versions are just the pre-filled defaults; empty string (or `null` for `context_length`/`gpu_memory_utilization`) means unset, same convention as `cpu_request` and friends.
 - `DELETE /api/templates/{id}` *(admin)* — delete a template
-- `GET /api/pvcs` — every `PersistentVolumeClaim` already existing in the watched namespace, `{name, capacity}` (`capacity` `null` if not yet Bound). Any logged-in user, same visibility as the Images catalog. Backs the Launch/Templates forms' storage-mount fields — Aether never creates or deletes a PVC itself, only mounts one that's already there (see "vLLM/SGLang: model, tensor parallelism, and storage" below).
-- `POST /api/deployments` — there's no `name` field: the backend generates one, `<username>-<instance type>-<6-char random suffix>`, truncating the instance-type segment as needed to stay within Kubernetes' 63-character name limit. "Instance type" is a slugified `template_name` when given, else a slug of `image`'s repository component (e.g. `nginx:alpine` → `nginx`, `jupyter/base-notebook` → `base-notebook`). The random suffix means a 409 from Kubernetes here would mean that exact suffix collided for you, which should essentially never happen. Every field below that echoes or embeds "the deployment's name" (`{{name}}` substitution, `proxy_path`, `service_name`) means this generated name. Creates a `Deployment` in the watched namespace (labeled `aether.io/owner: <your username>`), and if `container_port` is set, also a Service exposing it — `LoadBalancer` (public, external IP assigned by whatever your cluster's load-balancer implementation is) if `public_service` is true, `ClusterIP`-only otherwise. If the field is omitted this API defaults it to `true`; the Launch tab's own form, in contrast, now defaults its checkbox to off (see "Status & known limitations") — a raw API caller that omits the field still gets the old public-by-default behavior. Body: `{template_name, image, replicas, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, container_port, env, args, model, context_length, quantization, served_model_name, gpu_memory_utilization, dtype, volume_claim_name, volume_mount_path, volume_sub_path, generate_secret_for, enable_proxy, strip_prefix, public_service}` — everything except `image`/`replicas` is optional; `env` is `[[key, value], ...]` pairs (entries with an empty value are dropped, so an image's own default behavior — e.g. an auto-generated password logged at startup — still applies unless you set one); `args` is a list of container command-line arguments — `{{name}}` and `{{accelerator_count}}` are always substituted (the latter defaulting to `1` if unset); `{{model}}`, `{{context_length}}`, `{{quantization}}`, `{{served_model_name}}`, `{{gpu_memory_utilization}}`, and `{{dtype}}` are each substituted from the like-named field *if set* — if that field is unset, the whole `args` line containing the placeholder is dropped entirely rather than sending a broken `--flag=` with nothing after the `=`. `model` is just a plain string, whether it's a Hugging Face ID or a local path under `volume_mount_path`; `context_length` must be positive if set; `gpu_memory_utilization` must be in `(0.0, 1.0]` if set; `quantization`/`served_model_name`/`dtype` are free text. `volume_claim_name`, if set, mounts that existing `PersistentVolumeClaim` at `volume_mount_path` (both required together; 400 if no such claim exists), optionally scoped to `volume_sub_path` within it; `generate_secret_for`, if set to an env var name, generates a random value for it (overriding anything with that key in `env`) and stores it in `deployment_secrets`; `enable_proxy`, if `true`, requires `container_port` to be set (400 otherwise) and makes the app also reachable via `GET/POST/... /proxy/<name>/...`, with `strip_prefix` controlling how that route forwards paths (see "the reverse proxy" above); `public_service`, independent of `enable_proxy`, controls whether the Service is a public `LoadBalancer` or `ClusterIP`-only. Response adds `name` (the generated one), `service_name`/`container_port` (both `null` if no port was given), `secret_value` (the generated value, or `null`), `proxy_path` (`"/proxy/<name>/"` if `enable_proxy` was set, else `null`), and `public_service` (echoes the request, so the frontend knows whether to mention an external IP).
+- `GET /api/pvcs` — every `PersistentVolumeClaim` already existing in the watched namespace, `{name, capacity}` (`capacity` `null` if not yet Bound). Any logged-in user, same visibility as the Images catalog. Backs the Launch/Templates forms' storage-mount fields — Aether never creates or deletes a PVC itself, only mounts one that's already there (see "vLLM/SGLang: model, context length, quantization, storage, and readiness" below).
+- `POST /api/deployments` — there's no `name` field: the backend generates one, `<username>-<instance type>-<6-char random suffix>`, truncating the instance-type segment as needed to stay within Kubernetes' 63-character name limit. "Instance type" is a slugified `template_name` when given, else a slug of `image`'s repository component (e.g. `nginx:alpine` → `nginx`, `jupyter/base-notebook` → `base-notebook`). The random suffix means a 409 from Kubernetes here would mean that exact suffix collided for you, which should essentially never happen. Every field below that echoes or embeds "the deployment's name" (`{{name}}` substitution, `proxy_path`, `service_name`) means this generated name. Creates a `Deployment` in the watched namespace (labeled `aether.io/owner: <your username>`), and if `container_port` is set, also a Service exposing it — `LoadBalancer` (public, external IP assigned by whatever your cluster's load-balancer implementation is) if `public_service` is true, `ClusterIP`-only otherwise. If the field is omitted this API defaults it to `true`; the Launch tab's own form, in contrast, now defaults its checkbox to off (see "Status & known limitations") — a raw API caller that omits the field still gets the old public-by-default behavior. Body: `{template_name, image, replicas, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, container_port, env, args, model, context_length, quantization, served_model_name, gpu_memory_utilization, dtype, readiness_path, volume_claim_name, volume_mount_path, volume_sub_path, generate_secret_for, enable_proxy, strip_prefix, public_service}` — everything except `image`/`replicas` is optional; `env` is `[[key, value], ...]` pairs (entries with an empty value are dropped, so an image's own default behavior — e.g. an auto-generated password logged at startup — still applies unless you set one); `args` is a list of container command-line arguments — `{{name}}` and `{{accelerator_count}}` are always substituted (the latter defaulting to `1` if unset); `{{model}}`, `{{context_length}}`, `{{quantization}}`, `{{served_model_name}}`, `{{gpu_memory_utilization}}`, and `{{dtype}}` are each substituted from the like-named field *if set* — if that field is unset, the whole `args` line containing the placeholder is dropped entirely rather than sending a broken `--flag=` with nothing after the `=`. `model` is just a plain string, whether it's a Hugging Face ID or a local path under `volume_mount_path`; `context_length` must be positive if set; `gpu_memory_utilization` must be in `(0.0, 1.0]` if set; `quantization`/`served_model_name`/`dtype` are free text. `readiness_path`, if set, attaches an HTTP `readinessProbe` to the container at that path against `container_port` (400 if `container_port` isn't also set) — see "vLLM/SGLang: model, context length, quantization, storage, and readiness" below. `volume_claim_name`, if set, mounts that existing `PersistentVolumeClaim` at `volume_mount_path` (both required together; 400 if no such claim exists), optionally scoped to `volume_sub_path` within it; `generate_secret_for`, if set to an env var name, generates a random value for it (overriding anything with that key in `env`) and stores it in `deployment_secrets`; `enable_proxy`, if `true`, requires `container_port` to be set (400 otherwise) and makes the app also reachable via `GET/POST/... /proxy/<name>/...`, with `strip_prefix` controlling how that route forwards paths (see "the reverse proxy" above); `public_service`, independent of `enable_proxy`, controls whether the Service is a public `LoadBalancer` or `ClusterIP`-only. Response adds `name` (the generated one), `service_name`/`container_port` (both `null` if no port was given), `secret_value` (the generated value, or `null`), `proxy_path` (`"/proxy/<name>/"` if `enable_proxy` was set, else `null`), and `public_service` (echoes the request, so the frontend knows whether to mention an external IP).
 - `GET /api/deployments/{name}` — current editable state of a Deployment you own (or, for an admin, any Deployment): `{name, replicas, cpu_request, cpu_limit, memory_request, memory_limit, env, generated_secret_key}`. `env` excludes the auto-generated secret's entry, if any — its key is reported separately as `generated_secret_key` rather than its (regeneratable) value, since it's shown read-only rather than as an editable row. 403 if you don't own it, 404 if it doesn't exist. Backs the Pods tab's manage panel.
 - `PUT /api/deployments/{name}` — scales and/or updates resources/env on a Deployment you own (or, for an admin, any Deployment). Body: `{replicas, cpu_request, cpu_limit, memory_request, memory_limit, env}`. Image, container port, accelerator, and args are fixed at launch time — changing those is a delete + relaunch, not an edit. An existing auto-generated secret's env var is carried through untouched regardless of what's submitted in `env` — edits never regenerate or require resubmitting it, since a client may already be using that value. Same validation as create (quantities, env keys, non-negative replicas). Returns the same shape as `GET`.
 - `DELETE /api/deployments/{name}` — deletes a Deployment you own (or, for an admin, any Deployment), its Service if it has one, and its `deployment_secrets` row (if any) — the one place in the app that actually cleans up a generated credential rather than leaving it to outlive the deployment that used it. 403 if you don't own it.
+- `POST /api/deployments/{name}/restart` — bumps `kubectl.kubernetes.io/restartedAt` on the pod template to now, the same convention `kubectl rollout restart` uses, so the Deployment's existing rolling-update strategy rolls every pod over. No body, no response body. 403 if you don't own it.
+- `POST /api/deployments/{name}/rollback` — reverts the Deployment to its previous revision (image, resources, env, args — everything), read from the owning `ReplicaSet`'s revision history, same mechanism as `kubectl rollout undo`. No request body. 400 if there's no previous revision; 403 if you don't own it. Quota is re-checked the same way `PUT` is. Returns the same shape as `GET /api/deployments/{name}`.
+- `POST /api/deployments/{name}/regenerate-secret` — issues a fresh value for the Deployment's auto-generated credential, updates `deployment_secrets` and the live container's env, and restarts the pod (same mechanism as `restart` above) so a running pod is never left holding a value Aether itself no longer knows. No request body; response is `{secret_value}`. 400 if this Deployment has no auto-generated credential; 403 if you don't own it.
 - `ANY /proxy/{deployment_name}`, `ANY /proxy/{deployment_name}/`, `ANY /proxy/{deployment_name}/{*rest}` — reverse-proxies into a proxy-enabled deployment's pod (`backend/src/proxy.rs`), injecting its generated credential (if any) as the appropriate auth header so there's no login prompt. The first two (bare path / trailing slash, no further segment) are what every "Open" link actually points at; the wildcard one handles everything else the app itself requests once loaded. 403 if you're not that deployment's owner (or an admin); 400 if the deployment isn't proxy-enabled; 502 if the connection to its pod fails or times out (5s). Handles WebSocket upgrades transparently (needed for JupyterLab's kernel connections). See "Ownership, auto-generated credentials, and the reverse proxy" below.
 - `GET /api/pods/{name}/logs?container=&tail_lines=&previous=` — plain-text container logs (`container` defaults to the pod's only container if it has one; `tail_lines` defaults to 500; `previous=true` gets the last terminated instance's logs, for a crashed container)
 - `GET /api/pods/{name}/events` — JSON list of Kubernetes Events involving that pod (`type_`, `reason`, `message`, `count`, `last_seen`), most recent first — note the apiserver's default Event TTL is short (commonly ~1h), so older pods often have none left
@@ -332,7 +335,7 @@ any kind, it's purely about network exposure. Ollama/vLLM/SGLang default to
 `public_service = true` (external), matching their behavior before this
 toggle existed; flip it per template as needed.
 
-## vLLM/SGLang: model, context length, quantization, and storage
+## vLLM/SGLang: model, context length, quantization, storage, and readiness
 
 Launch (and the Templates admin form) has several pieces built
 specifically for LLM-serving templates, though none of them are actually
@@ -385,6 +388,17 @@ can use:
   `Pending` with an opaque mount-failure event), plus an optional
   `volume_sub_path` to scope the mount to one subdirectory of the claim
   rather than its root.
+- **Readiness probe path** — `readiness_path`, e.g. `/health`, attaches an
+  HTTP `readinessProbe` to the container against `container_port` (400 if
+  `container_port` isn't also set), with generous timing
+  (`periodSeconds=10`, `failureThreshold=60` — up to ~10 minutes) to
+  tolerate how long an LLM server can take to actually load a model into
+  GPU memory. Without one, Kubernetes considers the container Ready the
+  instant its process starts, which for these templates is well before
+  they can answer a request — the Pods tab's "Ready" status and any
+  rolling update would both be lying about it. The seeded vLLM/SGLang
+  templates default to `/health` (both engines expose it); Ollama's to
+  `/` (any 200 response counts).
 
 None of this requires a StorageClass or dynamic provisioning — a
 statically-bound `PersistentVolume`/`PersistentVolumeClaim` pair (NFS-
@@ -519,10 +533,35 @@ The Pods tab's detail panel (click any pod row) shows a **Manage** section
 for any pod that has a `deployment_name` — i.e. anything launched through
 Aether (or carrying an `app` label some other way). It lets you scale
 replicas, adjust CPU/memory requests and limits, edit environment
-variables, and delete the Deployment (plus its Service, if any) entirely.
-Image, container port, accelerator, and args are intentionally not
-editable here — changing any of those is a delete + relaunch through the
-Launch tab, not an in-place edit.
+variables, restart, roll back to the previous revision, regenerate an
+auto-generated credential, and delete the Deployment (plus its Service, if
+any) entirely. Image, container port, accelerator, and args are
+intentionally not editable here — changing any of those is a delete +
+relaunch through the Launch tab, not an in-place edit.
+
+- **Restart** (`POST /api/deployments/{name}/restart`) bumps the pod
+  template's `kubectl.kubernetes.io/restartedAt` annotation — the same
+  thing `kubectl rollout restart` does — so every pod rolls over via the
+  Deployment's existing rolling-update strategy, without scaling to 0 and
+  back up by hand. Useful to pick up a newly-mounted model file or recover
+  from a hung process.
+- **Roll back** (`POST /api/deployments/{name}/rollback`) reverts the
+  Deployment to its previous revision — image, resources, env, and args
+  exactly as they were immediately before the last change — reading the
+  `ReplicaSet` revision history Kubernetes already keeps for exactly this,
+  the same mechanism `kubectl rollout undo` uses. 400s if there's no
+  previous revision. Quota is re-checked the same way a normal edit is,
+  since a rollback can just as easily increase resource usage as decrease
+  it. Only ever undoes the single most recent change — rolling back twice
+  in a row toggles between the two most recent revisions, not a longer
+  history.
+- **Regenerate credential** (`POST /api/deployments/{name}/regenerate-secret`,
+  shown only when the Deployment has one) issues a fresh value for an
+  auto-generated credential without deleting and relaunching the
+  Deployment — updates `deployment_secrets` and the live container's env,
+  then restarts the pod the same way Restart does, since an env var change
+  only ever takes effect on a fresh pod. 400s if this Deployment has no
+  auto-generated credential to begin with.
 
 Authorization is enforced backend-side against the Deployment's own
 `aether.io/owner` label (`backend/src/deployments.rs::check_owner`), not
@@ -1017,7 +1056,25 @@ node; clearing the label and relaunching produced no `nodeSelector` at all;
 malformed label values (no `=`, illegal characters) were rejected with 400;
 a non-admin account got 403 attempting to set it; and a Puppeteer pass
 confirmed the Users tab's new "Node label" column and edit form render and
-save correctly. Known gaps, in case they matter for what you do next:
+save correctly. Restart, rollback, readiness probes, and credential
+regeneration were all verified against the real cluster: a readiness-probe
+launch (`nginx:alpine`, `readiness_path: "/"`) confirmed via `kubectl` to
+carry the exact `readinessProbe` (`httpGet`, `failureThreshold: 60`,
+`periodSeconds: 10`) and to actually report `ready: false` until nginx
+itself started answering; restart confirmed to produce a genuinely new pod
+(different name and `startTime`) with the `restartedAt` annotation set;
+rollback confirmed by editing a live deployment's CPU/memory limits via
+`PUT`, then rolling back and checking the response matched the pre-edit
+values exactly, with the readiness probe carried through unchanged, and a
+second rollback confirmed to toggle back to the edited values (the same
+"undo the last change" semantics as `kubectl rollout undo`); a deployment
+with no previous revision confirmed to 400 rather than silently no-op; and
+credential regeneration (JupyterLab launch, `JUPYTER_TOKEN`) confirmed to
+return a new value different from the one issued at launch, with `kubectl`
+confirming the live pod's env var actually held the new value and the pod
+had genuinely restarted (`creationTimestamp` of the Deployment vs.
+`restartedAt` annotation a few seconds later). Known gaps, in case they
+matter for what you do next:
 
 - **`public_service`'s default is inconsistent between the API and the UI.**
   The Launch tab's own form now defaults its checkbox to off (a public
@@ -1060,11 +1117,12 @@ save correctly. Known gaps, in case they matter for what you do next:
 - **Single namespace only**, fixed at deploy time via the pod's own
   namespace. No in-app namespace switcher; watching multiple namespaces
   means deploying multiple copies (see "Watching a different namespace").
-- **Deployment management covers scale/edit/delete, not everything** — see
-  "Managing running deployments" above. Still no way to hand-edit a
-  Service, no pod-level delete/restart independent of its Deployment
-  (scale to 0 and back up instead), and no rollout-history/rollback view —
-  a bad edit just needs manually editing it back, same as `kubectl`.
+- **Deployment management covers scale/edit/delete/restart/rollback, not
+  everything** — see "Managing running deployments" above. Still no way to
+  hand-edit a Service, no pod-level delete/restart independent of its
+  Deployment (restart rolls every pod, not one at a time by hand), and
+  rollback only ever undoes the single most recent change (like `kubectl
+  rollout undo`) — no picker across a longer revision history.
 - **`VLLM_API_KEY` is an educated guess, not a confirmed env var name** — it
   hasn't been verified against a real vLLM server run (see the vLLM
   templates gap above). If vLLM ignores it, the generated value shown in the

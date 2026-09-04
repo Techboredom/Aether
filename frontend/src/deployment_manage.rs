@@ -1,4 +1,4 @@
-use common::{DeploymentDetail, MyQuota, UpdateDeploymentRequest};
+use common::{DeploymentDetail, MyQuota, RegenerateSecretResponse, UpdateDeploymentRequest};
 use leptos::prelude::*;
 use leptos::tachys::dom::event_target_value;
 use leptos::task::spawn_local;
@@ -31,6 +31,12 @@ pub fn ManageDeploymentSection(deployment_name: String, selected: RwSignal<Optio
     let save_result: RwSignal<Option<Result<String, String>>> = RwSignal::new(None);
     let deleting = RwSignal::new(false);
     let delete_error = RwSignal::new(None::<String>);
+    let restarting = RwSignal::new(false);
+    let restart_result: RwSignal<Option<Result<String, String>>> = RwSignal::new(None);
+    let rolling_back = RwSignal::new(false);
+    let rollback_result: RwSignal<Option<Result<String, String>>> = RwSignal::new(None);
+    let regenerating = RwSignal::new(false);
+    let regenerate_result: RwSignal<Option<Result<String, String>>> = RwSignal::new(None);
 
     let my_quota: RwSignal<Option<MyQuota>> = RwSignal::new(None);
     let expose_requests = move || my_quota.get().map(|q| q.expose_resource_requests).unwrap_or(true);
@@ -41,20 +47,37 @@ pub fn ManageDeploymentSection(deployment_name: String, selected: RwSignal<Optio
         }
     });
 
+    // Also re-run after a rollback, since that can change replicas/resources/env
+    // out from under the form same as a save would.
+    async fn refresh_detail(
+        name: &str,
+        replicas: RwSignal<i32>,
+        cpu_request: RwSignal<String>,
+        cpu_limit: RwSignal<String>,
+        memory_request: RwSignal<String>,
+        memory_limit: RwSignal<String>,
+        env_vars: EnvVars,
+        generated_secret_key: RwSignal<Option<String>>,
+    ) -> Result<(), String> {
+        let detail = api::get_json::<DeploymentDetail>(&format!("/api/deployments/{name}")).await?;
+        replicas.set(detail.replicas);
+        cpu_request.set(detail.cpu_request.unwrap_or_default());
+        cpu_limit.set(detail.cpu_limit.unwrap_or_default());
+        memory_request.set(detail.memory_request.unwrap_or_default());
+        memory_limit.set(detail.memory_limit.unwrap_or_default());
+        env_vars.set_from(&detail.env);
+        generated_secret_key.set(detail.generated_secret_key);
+        Ok(())
+    }
+
     {
         let name = deployment_name.clone();
         spawn_local(async move {
-            match api::get_json::<DeploymentDetail>(&format!("/api/deployments/{name}")).await {
-                    Ok(detail) => {
-                        replicas.set(detail.replicas);
-                        cpu_request.set(detail.cpu_request.unwrap_or_default());
-                        cpu_limit.set(detail.cpu_limit.unwrap_or_default());
-                        memory_request.set(detail.memory_request.unwrap_or_default());
-                        memory_limit.set(detail.memory_limit.unwrap_or_default());
-                        env_vars.set_from(&detail.env);
-                        generated_secret_key.set(detail.generated_secret_key);
-                    }
-                    Err(err) => load_error.set(Some(format!("failed to load deployment: {err}"))),
+            if let Err(err) =
+                refresh_detail(&name, replicas, cpu_request, cpu_limit, memory_request, memory_limit, env_vars, generated_secret_key)
+                    .await
+            {
+                load_error.set(Some(format!("failed to load deployment: {err}")));
             }
             loading.set(false);
         });
@@ -126,6 +149,93 @@ pub fn ManageDeploymentSection(deployment_name: String, selected: RwSignal<Optio
                                 Ok(()) => selected.set(None),
                                 Err(err) => delete_error.set(Some(format!("failed to delete: {err}"))),
                             }
+                        });
+                    }
+                };
+
+                let on_restart = {
+                    let name = deployment_name.clone();
+                    move |_| {
+                        if restarting.get() {
+                            return;
+                        }
+                        let name = name.clone();
+                        restarting.set(true);
+                        restart_result.set(None);
+                        spawn_local(async move {
+                            let outcome = api::post_empty(&format!("/api/deployments/{name}/restart"))
+                                .await
+                                .map(|()| "Restart triggered — pods will roll over one at a time.".to_string())
+                                .map_err(|err| format!("failed to restart: {err}"));
+                            restarting.set(false);
+                            restart_result.set(Some(outcome));
+                        });
+                    }
+                };
+
+                let on_rollback = {
+                    let name = deployment_name.clone();
+                    move |_| {
+                        let confirmed = web_sys::window()
+                            .and_then(|w| {
+                                w.confirm_with_message(&format!(
+                                    "Roll back \"{name}\" to its previous revision? This reverts image, resources, env, and args to what they were before the last change."
+                                ))
+                                .ok()
+                            })
+                            .unwrap_or(false);
+                        if !confirmed || rolling_back.get() {
+                            return;
+                        }
+                        let name = name.clone();
+                        rolling_back.set(true);
+                        rollback_result.set(None);
+                        spawn_local(async move {
+                            let outcome: Result<DeploymentDetail, String> =
+                                api::post_empty_json(&format!("/api/deployments/{name}/rollback")).await;
+                            match outcome {
+                                Ok(detail) => {
+                                    replicas.set(detail.replicas);
+                                    cpu_request.set(detail.cpu_request.unwrap_or_default());
+                                    cpu_limit.set(detail.cpu_limit.unwrap_or_default());
+                                    memory_request.set(detail.memory_request.unwrap_or_default());
+                                    memory_limit.set(detail.memory_limit.unwrap_or_default());
+                                    env_vars.set_from(&detail.env);
+                                    generated_secret_key.set(detail.generated_secret_key);
+                                    rollback_result.set(Some(Ok("Rolled back to the previous revision.".to_string())));
+                                }
+                                Err(err) => rollback_result.set(Some(Err(format!("failed to roll back: {err}")))),
+                            }
+                            rolling_back.set(false);
+                        });
+                    }
+                };
+
+                let on_regenerate_secret = {
+                    let name = deployment_name.clone();
+                    move |_| {
+                        let confirmed = web_sys::window()
+                            .and_then(|w| {
+                                w.confirm_with_message(
+                                    "Regenerate this deployment's credential? The current value stops working immediately, and the pod restarts to pick up the new one."
+                                )
+                                .ok()
+                            })
+                            .unwrap_or(false);
+                        if !confirmed || regenerating.get() {
+                            return;
+                        }
+                        let name = name.clone();
+                        regenerating.set(true);
+                        regenerate_result.set(None);
+                        spawn_local(async move {
+                            let outcome: Result<RegenerateSecretResponse, String> =
+                                api::post_empty_json(&format!("/api/deployments/{name}/regenerate-secret")).await;
+                            regenerating.set(false);
+                            regenerate_result.set(Some(match outcome {
+                                Ok(resp) => Ok(format!("New value: {}", resp.secret_value)),
+                                Err(err) => Err(format!("failed to regenerate: {err}")),
+                            }));
                         });
                     }
                 };
@@ -232,6 +342,47 @@ pub fn ManageDeploymentSection(deployment_name: String, selected: RwSignal<Optio
 
                         {move || {
                             save_result.get().map(|res| match res {
+                                Ok(msg) => view! { <div class="success">{msg}</div> }.into_any(),
+                                Err(msg) => view! { <div class="error">{msg}</div> }.into_any(),
+                            })
+                        }}
+
+                        <div class="form-actions">
+                            <button type="button" disabled=move || restarting.get() on:click=on_restart>
+                                {move || if restarting.get() { "Restarting…" } else { "Restart" }}
+                            </button>
+                            <button type="button" disabled=move || rolling_back.get() on:click=on_rollback>
+                                {move || if rolling_back.get() { "Rolling back…" } else { "Roll back to previous revision" }}
+                            </button>
+                            {move || {
+                                let on_regenerate_secret = on_regenerate_secret.clone();
+                                generated_secret_key
+                                    .get()
+                                    .map(|_| {
+                                        view! {
+                                            <button type="button" disabled=move || regenerating.get() on:click=on_regenerate_secret>
+                                                {move || {
+                                                    if regenerating.get() { "Regenerating…" } else { "Regenerate credential" }
+                                                }}
+                                            </button>
+                                        }
+                                    })
+                            }}
+                        </div>
+                        {move || {
+                            restart_result.get().map(|res| match res {
+                                Ok(msg) => view! { <div class="success">{msg}</div> }.into_any(),
+                                Err(msg) => view! { <div class="error">{msg}</div> }.into_any(),
+                            })
+                        }}
+                        {move || {
+                            rollback_result.get().map(|res| match res {
+                                Ok(msg) => view! { <div class="success">{msg}</div> }.into_any(),
+                                Err(msg) => view! { <div class="error">{msg}</div> }.into_any(),
+                            })
+                        }}
+                        {move || {
+                            regenerate_result.get().map(|res| match res {
                                 Ok(msg) => view! { <div class="success">{msg}</div> }.into_any(),
                                 Err(msg) => view! { <div class="error">{msg}</div> }.into_any(),
                             })

@@ -54,6 +54,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   actually exist before the Deployment is created (400 immediately on a
   typo, rather than a pod stuck `Pending` with an opaque mount-failure
   event). New RBAC verbs: `persistentvolumeclaims` `get`/`list`.
+- **Restart**: `POST /api/deployments/{name}/restart` bumps the pod
+  template's `kubectl.kubernetes.io/restartedAt` annotation — the same
+  convention `kubectl rollout restart` uses — to roll every pod over via
+  the existing rolling-update strategy, without scaling to 0 and back up
+  by hand.
+- **Readiness probes**: a new optional `readiness_path` (Launch and
+  Templates forms, requires a container port) attaches an HTTP
+  `readinessProbe` to the launched container, with generous timing
+  (`periodSeconds=10`, `failureThreshold=60`) to tolerate a slow-loading
+  LLM server. Without one, Kubernetes considers a container Ready the
+  instant its process starts — for vLLM/SGLang/Ollama that's well before
+  the model has actually finished loading and the server can answer
+  requests, so both the Pods tab's "Ready" status and any rolling update
+  were previously lying about it. The seeded vLLM/SGLang templates default
+  to `/health`, Ollama to `/`. New RBAC verb: `apps/replicasets` `get`/`list`
+  (needed for rollback, below, not this).
+- **Rollback**: `POST /api/deployments/{name}/rollback` reverts a
+  Deployment to its previous revision — image, resources, env, and args
+  exactly as they were before the last edit — the same mechanism
+  `kubectl rollout undo` uses, reading the `ReplicaSet` revision history
+  Kubernetes already keeps. 400s if there's no previous revision. Quota is
+  re-checked the same way a normal edit is, since a rollback can just as
+  easily increase resource usage as decrease it.
+- **Credential regeneration**: `POST /api/deployments/{name}/regenerate-secret`
+  issues a fresh value for a deployment's auto-generated credential (a
+  JupyterLab token, an RStudio password, ...) without deleting and
+  relaunching it — updates both `deployment_secrets` and the live
+  container's env, then restarts the pod (the same mechanism as Restart,
+  above) so a running pod is never left holding a credential Aether itself
+  no longer knows. 400s if this deployment has no auto-generated
+  credential to begin with.
 
 ### Changed
 
