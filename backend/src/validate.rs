@@ -115,18 +115,23 @@ pub fn bounded_list(field: &str, items: &[impl AsRef<str>], max_items: usize, ma
 }
 
 /// Also doubles as a Kubernetes label *value* (the `aether.io/owner` label
-/// tracking who launched a Deployment), hence the stricter start/end rule
-/// beyond just "printable and short".
+/// tracking who launched a Deployment) and, since deployments.rs prefixes
+/// every launch's name with it (`<username>-<name>`, so a name only has to
+/// be unique among what *that* user has launched, not everyone's), as part
+/// of a Deployment/Service *name* itself — hence the same DNS-1123 grammar
+/// as validate::k8s_name (lowercase alphanumeric and '-' only, no '.'/'_',
+/// no uppercase) rather than the more permissive rule this used to have.
 pub fn username(value: &str) -> Result<(), ApiError> {
     if value.len() < 3 || value.len() > 32 {
         return Err(bad("username", "must be 3-32 characters"));
     }
-    if !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') {
-        return Err(bad("username", "must contain only letters, digits, '.', '_', or '-'"));
-    }
     let bytes = value.as_bytes();
-    if !bytes[0].is_ascii_alphanumeric() || !bytes[bytes.len() - 1].is_ascii_alphanumeric() {
-        return Err(bad("username", "must start and end with a letter or digit"));
+    let is_alphanumeric = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    if !is_alphanumeric(bytes[0]) || !is_alphanumeric(bytes[bytes.len() - 1]) {
+        return Err(bad("username", "must start and end with a lowercase letter or digit"));
+    }
+    if !bytes.iter().all(|&b| is_alphanumeric(b) || b == b'-') {
+        return Err(bad("username", "must be lowercase letters, digits, or '-' only"));
     }
     Ok(())
 }
@@ -247,13 +252,16 @@ mod tests {
     }
 
     #[test]
-    fn usernames_double_as_kubernetes_label_values() {
-        for name in ["alice", "bob.smith", "a-b_c", "abc"] {
+    fn usernames_double_as_kubernetes_names_and_label_values() {
+        for name in ["alice", "bob-smith", "a-b-c", "abc"] {
             assert!(is_ok(username(name)), "should accept {name}");
         }
-        // Too short/long, or not starting/ending alphanumeric — the label
-        // value rules, since this becomes aether.io/owner.
-        for name in ["ab", &"a".repeat(33), "-alice", "alice-", "_alice", "al ice", "al/ice"] {
+        // Too short/long, not starting/ending alphanumeric, or containing
+        // characters valid in a label value but not in a k8s *name* (dots,
+        // underscores, uppercase) — since a username now also becomes part
+        // of a Deployment/Service name (deployments.rs's `<username>-<name>`
+        // scoping), not just the aether.io/owner label value.
+        for name in ["ab", &"a".repeat(33), "-alice", "alice-", "_alice", "al ice", "al/ice", "bob.smith", "a-b_c", "Alice"] {
             assert!(!is_ok(username(name)), "should reject {name:?}");
         }
     }

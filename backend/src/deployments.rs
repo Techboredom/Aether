@@ -69,6 +69,20 @@ pub async fn create_deployment(
     req.memory_limit = normalize_quantity(req.memory_limit.take());
 
     validate::k8s_name("name", &req.name)?;
+    // Deployment names are shared across every user in this one namespace;
+    // prefixing with the caller's own username means a name only has to be
+    // unique among what *that* user has launched, not everyone's. Safe as a
+    // plain string join because usernames are validated against the same
+    // DNS-1123 grammar as a k8s name (see validate::username) — no
+    // separator character in either half that could make two different
+    // (username, name) pairs collide on the same scoped_name.
+    let scoped_name = format!("{}-{}", user.username, req.name);
+    if scoped_name.len() > 63 {
+        return Err(ApiError::BadRequest(format!(
+            "\"{scoped_name}\" (your username plus this name) is too long ({} characters, max 63) — try a shorter name",
+            scoped_name.len()
+        )));
+    }
     validate::image_ref(&req.image)?;
     if req.replicas < 0 {
         return Err(ApiError::BadRequest("replicas must not be negative".into()));
@@ -169,7 +183,7 @@ pub async fn create_deployment(
     let args: Vec<String> = req
         .args
         .iter()
-        .map(|a| a.trim().replace("{{name}}", &req.name))
+        .map(|a| a.trim().replace("{{name}}", &scoped_name))
         .filter(|a| !a.is_empty())
         .collect();
     // `args` gets moved into the Container below; keep a copy for launch_log.
@@ -180,13 +194,13 @@ pub async fn create_deployment(
     // top of it (on the Deployment, its pods, and the Service), not part of
     // the selector itself.
     let mut selector_labels = BTreeMap::new();
-    selector_labels.insert("app".to_string(), req.name.clone());
+    selector_labels.insert("app".to_string(), scoped_name.clone());
     let mut object_labels = selector_labels.clone();
     object_labels.insert(OWNER_LABEL.to_string(), user.username.clone());
 
     let deployment = Deployment {
         metadata: ObjectMeta {
-            name: Some(req.name.clone()),
+            name: Some(scoped_name.clone()),
             namespace: Some(state.namespace.clone()),
             labels: Some(object_labels.clone()),
             ..Default::default()
@@ -205,7 +219,7 @@ pub async fn create_deployment(
                 spec: Some(PodSpec {
                     node_selector: node_selector_for(&user),
                     containers: vec![Container {
-                        name: req.name.clone(),
+                        name: scoped_name.clone(),
                         image: Some(req.image.clone()),
                         resources: Some(ResourceRequirements {
                             requests: (!requests.is_empty()).then_some(requests),
@@ -226,12 +240,12 @@ pub async fn create_deployment(
 
     let deployments: Api<Deployment> = Api::namespaced(state.client.clone(), &state.namespace);
     let created = deployments.create(&PostParams::default(), &deployment).await.map_err(|err| {
-        // Deployment names are unique per namespace, and every user shares
-        // one namespace — so a clash may well be with someone else's
-        // deployment, which the bare API-server message doesn't hint at.
+        // The actual object name is scoped by username, so a 409 here means
+        // this exact user already has a deployment by this exact name —
+        // not a clash with anyone else's.
         match &err {
             kube::Error::Api(status) if status.code == 409 => ApiError::BadRequest(format!(
-                "a deployment named \"{}\" already exists — names are shared across all users here, so pick another",
+                "you already have a deployment named \"{}\" — pick another name",
                 req.name
             )),
             _ => ApiError::from(err),
@@ -240,7 +254,7 @@ pub async fn create_deployment(
     // The new footprint is now visible to the next quota check; everything
     // below is bookkeeping that doesn't affect it.
     launch_tx.commit().await?;
-    let name = created.metadata.name.unwrap_or(req.name);
+    let name = created.metadata.name.unwrap_or(scoped_name);
 
     // No ingress controller in the cluster yet, so expose the app directly via
     // its own Service — `LoadBalancer` (MetalLB assigns it an external IP) by
