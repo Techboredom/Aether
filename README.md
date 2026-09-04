@@ -137,13 +137,14 @@ frontend/src/api.rs             Typed wrappers over gloo_net (encode, send, deco
 frontend/src/result_banner.rs   Shared success/error banner components every form uses
 frontend/src/theme.rs           Light/dark theme toggle (data-theme attribute + localStorage)
 Dockerfile                 Multi-stage build: compiles both crates, ships a distroless image
-.forgejo/                  Forgejo Actions workflow that builds and pushes the image, then bumps the deploy repo
+charts/aether/             Helm chart — the supported way to install this on your own cluster
+.github/workflows/         Public CI (test/lint/helm-lint) and the tagged-release pipeline
 SPEC.md                    The broader platform vision this app is a slice of
 ```
 
-Kubernetes manifests and the Argo CD `Application` that deploys this app
-live in a separate repo, **Aether-Deploy** — not here. See "GitOps deploy
-(Argo CD)" below for why, and for how the two repos fit together.
+This maintainer's own deployment of Aether (which cluster, which registry,
+how it's kept in sync) isn't covered in this README — see "Quick start"
+above and `charts/aether/README.md` for installing your own.
 
 ## Running locally
 
@@ -237,7 +238,7 @@ additionally require the `admin` role (403 otherwise).
 - `GET /api/templates` — JSON list of templates (any logged-in role — needed for the Launch tab's dropdown)
 - `POST /api/templates` / `PUT /api/templates/{id}` *(admin)* — create/update a template. Body is a `TemplateEntry` minus `id`: `{name, image, container_port, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, env, args, notes, secret_env_key, proxy_enabled, strip_prefix, public_service}` — only `name`/`image` are required, everything else defaults to empty/`null`/`false`/`true`. `secret_env_key`, if set, is the env var name (e.g. `JUPYTER_TOKEN`) that Launch should auto-generate instead of showing as an editable field — a proxy-enabled template doesn't need one (RStudio has none). `strip_prefix` only matters when `proxy_enabled` is set (see "the reverse proxy" above). `public_service` is independent of `proxy_enabled` — set it to `false` either for a proxied app with no auth of its own (Aether's login becomes the only way in, e.g. RStudio), or for a plain internal-only service consumed from inside the cluster (e.g. an LLM engine other in-cluster tooling talks to directly, with no browser login to bypass and no proxy involved at all).
 - `DELETE /api/templates/{id}` *(admin)* — delete a template
-- `POST /api/deployments` — creates a `Deployment` in the watched namespace (labeled `aether.io/owner: <your username>`), and if `container_port` is set, also a Service exposing it — `LoadBalancer` (public, MetalLB-assigned external IP) if `public_service` is true (the default), `ClusterIP`-only otherwise. Body: `{name, image, replicas, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, container_port, env, args, generate_secret_for, enable_proxy, strip_prefix, public_service}` — everything except `name`/`image`/`replicas` is optional (`public_service` defaults to `true` if omitted); `env` is `[[key, value], ...]` pairs (entries with an empty value are dropped, so an image's own default behavior — e.g. an auto-generated password logged at startup — still applies unless you set one); `args` is a list of container command-line arguments (any occurrence of the literal string `{{name}}` is substituted with the deployment's own name first); `generate_secret_for`, if set to an env var name, generates a random value for it (overriding anything with that key in `env`) and stores it in `deployment_secrets`; `enable_proxy`, if `true`, requires `container_port` to be set (400 otherwise) and makes the app also reachable via `GET/POST/... /proxy/<name>/...`, with `strip_prefix` controlling how that route forwards paths (see "the reverse proxy" above); `public_service`, independent of `enable_proxy`, controls whether the Service is a public `LoadBalancer` or `ClusterIP`-only. Response adds `service_name`/`container_port` (both `null` if no port was given), `secret_value` (the generated value, or `null`), `proxy_path` (`"/proxy/<name>/"` if `enable_proxy` was set, else `null`), and `public_service` (echoes the request, so the frontend knows whether to mention an external IP).
+- `POST /api/deployments` — creates a `Deployment` in the watched namespace (labeled `aether.io/owner: <your username>`), and if `container_port` is set, also a Service exposing it — `LoadBalancer` (public, external IP assigned by whatever your cluster's load-balancer implementation is) if `public_service` is true, `ClusterIP`-only otherwise. If the field is omitted this API defaults it to `true`; the Launch tab's own form, in contrast, now defaults its checkbox to off (see "Status & known limitations") — a raw API caller that omits the field still gets the old public-by-default behavior. Body: `{name, image, replicas, cpu_request, cpu_limit, memory_request, memory_limit, accelerator_type, accelerator_count, container_port, env, args, generate_secret_for, enable_proxy, strip_prefix, public_service}` — everything except `name`/`image`/`replicas` is optional; `env` is `[[key, value], ...]` pairs (entries with an empty value are dropped, so an image's own default behavior — e.g. an auto-generated password logged at startup — still applies unless you set one); `args` is a list of container command-line arguments (any occurrence of the literal string `{{name}}` is substituted with the deployment's own name first); `generate_secret_for`, if set to an env var name, generates a random value for it (overriding anything with that key in `env`) and stores it in `deployment_secrets`; `enable_proxy`, if `true`, requires `container_port` to be set (400 otherwise) and makes the app also reachable via `GET/POST/... /proxy/<name>/...`, with `strip_prefix` controlling how that route forwards paths (see "the reverse proxy" above); `public_service`, independent of `enable_proxy`, controls whether the Service is a public `LoadBalancer` or `ClusterIP`-only. Response adds `service_name`/`container_port` (both `null` if no port was given), `secret_value` (the generated value, or `null`), `proxy_path` (`"/proxy/<name>/"` if `enable_proxy` was set, else `null`), and `public_service` (echoes the request, so the frontend knows whether to mention an external IP).
 - `GET /api/deployments/{name}` — current editable state of a Deployment you own (or, for an admin, any Deployment): `{name, replicas, cpu_request, cpu_limit, memory_request, memory_limit, env, generated_secret_key}`. `env` excludes the auto-generated secret's entry, if any — its key is reported separately as `generated_secret_key` rather than its (regeneratable) value, since it's shown read-only rather than as an editable row. 403 if you don't own it, 404 if it doesn't exist. Backs the Pods tab's manage panel.
 - `PUT /api/deployments/{name}` — scales and/or updates resources/env on a Deployment you own (or, for an admin, any Deployment). Body: `{replicas, cpu_request, cpu_limit, memory_request, memory_limit, env}`. Image, container port, accelerator, and args are fixed at launch time — changing those is a delete + relaunch, not an edit. An existing auto-generated secret's env var is carried through untouched regardless of what's submitted in `env` — edits never regenerate or require resubmitting it, since a client may already be using that value. Same validation as create (quantities, env keys, non-negative replicas). Returns the same shape as `GET`.
 - `DELETE /api/deployments/{name}` — deletes a Deployment you own (or, for an admin, any Deployment), its Service if it has one, and its `deployment_secrets` row (if any) — the one place in the app that actually cleans up a generated credential rather than leaving it to outlive the deployment that used it. 403 if you don't own it.
@@ -682,11 +683,12 @@ docker build -t <registry>/aether/aether:latest .
 docker push <registry>/aether/aether:latest
 ```
 
-CI (both pipelines — see below) instead produces a multi-arch (amd64+arm64)
-image via `docker buildx build --platform linux/amd64,linux/arm64 --push`,
-so QEMU-emulated Rust compilation for whichever arch isn't the runner's own
-native one only ever happens there, on a schedule that doesn't care how
-long it takes — not on your own machine's build-edit-test loop.
+`.github/workflows/release.yml` instead produces a genuinely multi-arch
+(amd64+arm64) image on every tagged release, built natively on two
+per-arch runners rather than via QEMU emulation — emulated Rust
+compilation is slow enough (tens of minutes) to make a release
+frustrating, so it's worth the extra runner rather than one runner
+emitting both platforms.
 
 The image is a distroless (`gcr.io/distroless/cc-debian12:nonroot`) runtime
 containing just the compiled backend binary and the built frontend assets —
@@ -695,27 +697,21 @@ Dockerfile needs no per-arch branching either way.
 
 ## Deploying to Kubernetes
 
-For anyone installing Aether on their own cluster: use the Helm chart in
-`charts/aether/` (published as an OCI artifact on each tagged release —
-see "Quick start" above and `charts/aether/README.md` for the full values
-reference). It's a parameterized port of exactly the manifests described
-below — same RBAC verb list, same container `securityContext`, same
-probe split — with this cluster's specific values (its domain, its
-registry, its node labels) replaced by chart values that default to
-something that works on any cluster.
+Use the Helm chart in `charts/aether/`, published as an OCI artifact on
+each tagged release — see "Quick start" above, and `charts/aether/README.md`
+for the full values reference, the guards it enforces before rendering,
+and a worked cert-manager + Let's Encrypt example. Nothing about it is
+specific to any one cluster: the `ServiceAccount`/`Role`/`RoleBinding`,
+`Deployment`, `Service`, `Ingress`, and `Certificate` it renders are all
+driven entirely by chart values, with no cluster-specific defaults baked
+in (domain, registry, node placement, all unset by default).
 
-Postgres doesn't need a manual secret — it runs in-cluster via
-CloudNativePG (`postgres/postgres-cluster.yaml` in Aether-Deploy, kept
-outside the chart since the chart's own bundled-Postgres option is
-evaluation-only), which auto-generates its own connection-string secret.
-See Aether-Deploy's README, "Postgres (CloudNativePG)", for the one-time
-operator/StorageClass bootstrap that needs.
-
-Everything else the chart renders — the `ServiceAccount`/`Role`/
-`RoleBinding`, `Deployment`, `Service`, `Ingress`, `Certificate`, and how
-to point at a different namespace — is controlled by this cluster's
-`values.yaml` in Aether-Deploy; what each value does is documented in
-`charts/aether/README.md` here.
+Postgres doesn't need a manual secret if you already run one elsewhere —
+point `database.existingSecret` at a Secret holding its connection string
+(any Postgres works; the chart doesn't assume CloudNativePG or anything
+else specifically). `database.deploy.enabled=true` deploys a bundled,
+evaluation-only single-replica Postgres instead, for trying this out
+without a database of your own on hand.
 
 
 ## Security notes
@@ -931,6 +927,14 @@ a non-admin account got 403 attempting to set it; and a Puppeteer pass
 confirmed the Users tab's new "Node label" column and edit form render and
 save correctly. Known gaps, in case they matter for what you do next:
 
+- **`public_service`'s default is inconsistent between the API and the UI.**
+  The Launch tab's own form now defaults its checkbox to off (a public
+  `LoadBalancer` with no ingress/LB controller in front of it is the thing
+  most likely to look broken on a fresh cluster), but `POST /api/deployments`
+  still defaults the field itself to `true` when it's omitted from the
+  request body entirely — a script or other direct API caller that doesn't
+  send `public_service` explicitly still gets the old public-by-default
+  behavior. Always send it explicitly if you're calling the API directly.
 - **Still no "forgot password" self-service flow** — that requires emailing
   a reset link, which this app has no mechanism for (no SMTP config, no
   email field on accounts). An admin can reset a locked-out user's password
@@ -959,20 +963,6 @@ save correctly. Known gaps, in case they matter for what you do next:
   multi-GB vLLM/SGLang images, which would have been slow in this
   environment. Expect to iterate on their default resource sizing once you
   actually run one.
-- **Not yet fully deployed for real, as of this writing** — Argo CD has
-  successfully synced Aether-Deploy (namespace, `Deployment`, `Service` with
-  a real external IP all exist), but the pod itself is stuck in
-  `ImagePullBackOff`: it needs the `regcred` secret created (see "Deploying
-  to Kubernetes" above) and a Postgres connection, neither of which exist
-  yet. The Forgejo Actions runner setup (see "CI" above) is now believed
-  complete — scope, job-container/host-mode, Node, and registry-TLS issues
-  all resolved — but a full green build → tag-bump → Argo CD sync run
-  hasn't actually been observed end-to-end yet.
-- **In-cluster Postgres (CloudNativePG) is wired up but not live yet** —
-  `postgres-cluster.yaml` in Aether-Deploy needs the CloudNativePG operator
-  installed and a real StorageClass named in its `storageClassName` field
-  (currently `REPLACE_ME`); both are in progress. See Aether-Deploy's
-  README, "Postgres (CloudNativePG)".
 - **No confirmation on template or image edits**, only on delete — saving over an
   existing template's fields is immediate.
 - **Single namespace only**, fixed at deploy time via the pod's own
@@ -1022,8 +1012,8 @@ save correctly. Known gaps, in case they matter for what you do next:
   routable from outside the cluster network. This is the one code path in
   this app that can't be exercised with the backend running locally against
   a remote cluster (this project's usual local-dev pattern); testing it for
-  real requires actually deploying Aether via Aether-Deploy/Argo CD (see
-  "Not yet deployed for real" below) — it was instead verified by curling a proxy-enabled
+  real requires an actual in-cluster install (Helm chart above) — it was
+  instead verified by curling a proxy-enabled
   deployment's ClusterIP with the exact header Aether would send, from a
   throwaway pod inside the cluster, to confirm the target app accepts it
   correctly; the Rust-side HTTP/WebSocket-tunneling code was verified

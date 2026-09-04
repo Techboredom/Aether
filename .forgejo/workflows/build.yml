@@ -54,10 +54,15 @@ jobs:
   build:
     needs: check
     runs-on: docker
+    # REGISTRY/IMAGE/DEPLOY_REPO are repository Variables (Settings ->
+    # Actions -> Variables, not Secrets - these aren't sensitive on their
+    # own, just specific to wherever this is actually deployed), so this
+    # workflow file itself names no real infrastructure - it's the same
+    # file whether it's public or not.
     env:
-      REGISTRY: ctr.int.example.com:8443
-      IMAGE: ctr.int.example.com:8443/aether/aether
-      DEPLOY_REPO: git.example.com/Aether/Aether-Deploy.git
+      REGISTRY: ${{ vars.REGISTRY }}
+      IMAGE: ${{ vars.IMAGE }}
+      DEPLOY_REPO: ${{ vars.DEPLOY_REPO }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -157,7 +162,7 @@ jobs:
           fi
 
           git config user.name "aether-ci"
-          git config user.email "ci@example.com"
+          git config user.email "aether-ci@users.noreply.git"
           git add values.yaml
           git commit -m "deploy: bump aether image to $TAG"
           git push origin HEAD:main
