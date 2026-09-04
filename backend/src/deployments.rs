@@ -85,25 +85,36 @@ fn scoped_deployment_name(username: &str, instance_type: &str) -> String {
 /// reference it, e.g. vLLM's `--tensor-parallel-size`, doesn't end up with
 /// a nonsensical 0) always have a value, so they're always substituted.
 ///
-/// `{{model}}`/`{{context_length}}`/`{{quantization}}` are genuinely
-/// optional — substituting an empty string for an unset one would send a
-/// broken `--flag=` with nothing after the `=`. Instead, a line containing
-/// one of these is dropped *entirely* when that field is unset, so a
+/// Everything else in `ArgsContext` is genuinely optional — substituting an
+/// empty string for an unset one would send a broken `--flag=` with
+/// nothing after the `=`. Instead, a line containing one of those
+/// placeholders is dropped *entirely* when that field is unset, so a
 /// template's args can always list an optional flag on its own line and
 /// have it simply not appear rather than reaching the container broken.
-fn substitute_args(
-    raw_args: &[String],
-    name: &str,
+/// The optional, per-launch values `substitute_args` can substitute — a
+/// struct rather than more positional parameters, since there are enough
+/// same-typed (`Option<&str>`) fields here that positional args would be
+/// easy to transpose by accident.
+#[derive(Default)]
+struct ArgsContext<'a> {
     accelerator_count: Option<i64>,
-    model: Option<&str>,
+    model: Option<&'a str>,
     context_length: Option<i64>,
-    quantization: Option<&str>,
-) -> Vec<String> {
-    let accelerator_count_str = accelerator_count.filter(|&c| c > 0).unwrap_or(1).to_string();
-    let optional_placeholders: [(&str, Option<String>); 3] = [
-        ("{{model}}", model.filter(|s| !s.is_empty()).map(str::to_string)),
-        ("{{context_length}}", context_length.map(|n| n.to_string())),
-        ("{{quantization}}", quantization.filter(|s| !s.is_empty()).map(str::to_string)),
+    quantization: Option<&'a str>,
+    served_model_name: Option<&'a str>,
+    gpu_memory_utilization: Option<f64>,
+    dtype: Option<&'a str>,
+}
+
+fn substitute_args(raw_args: &[String], name: &str, ctx: &ArgsContext) -> Vec<String> {
+    let accelerator_count_str = ctx.accelerator_count.filter(|&c| c > 0).unwrap_or(1).to_string();
+    let optional_placeholders: [(&str, Option<String>); 6] = [
+        ("{{model}}", ctx.model.filter(|s| !s.is_empty()).map(str::to_string)),
+        ("{{context_length}}", ctx.context_length.map(|n| n.to_string())),
+        ("{{quantization}}", ctx.quantization.filter(|s| !s.is_empty()).map(str::to_string)),
+        ("{{served_model_name}}", ctx.served_model_name.filter(|s| !s.is_empty()).map(str::to_string)),
+        ("{{gpu_memory_utilization}}", ctx.gpu_memory_utilization.map(|f| f.to_string())),
+        ("{{dtype}}", ctx.dtype.filter(|s| !s.is_empty()).map(str::to_string)),
     ];
     raw_args
         .iter()
@@ -190,10 +201,15 @@ pub async fn create_deployment(
     }
     validate::optional_text("model", req.model.as_deref().unwrap_or(""), 500)?;
     validate::optional_text("quantization", req.quantization.as_deref().unwrap_or(""), 100)?;
+    validate::optional_text("served_model_name", req.served_model_name.as_deref().unwrap_or(""), 200)?;
+    validate::optional_text("dtype", req.dtype.as_deref().unwrap_or(""), 50)?;
     if let Some(n) = req.context_length
         && n <= 0
     {
         return Err(ApiError::BadRequest("context_length: must be positive".into()));
+    }
+    if let Some(f) = req.gpu_memory_utilization {
+        validate::fraction("gpu_memory_utilization", f)?;
     }
     validate::volume_mount(req.volume_claim_name.as_deref().unwrap_or(""), req.volume_mount_path.as_deref().unwrap_or(""))?;
     if let Some(claim_name) = &req.volume_claim_name {
@@ -290,7 +306,19 @@ pub async fn create_deployment(
         env.push(EnvVar { name: key.clone(), value: Some(value.clone()), ..Default::default() });
         value
     });
-    let args = substitute_args(&req.args, &scoped_name, req.accelerator_count, req.model.as_deref(), req.context_length, req.quantization.as_deref());
+    let args = substitute_args(
+        &req.args,
+        &scoped_name,
+        &ArgsContext {
+            accelerator_count: req.accelerator_count,
+            model: req.model.as_deref(),
+            context_length: req.context_length,
+            quantization: req.quantization.as_deref(),
+            served_model_name: req.served_model_name.as_deref(),
+            gpu_memory_utilization: req.gpu_memory_utilization,
+            dtype: req.dtype.as_deref(),
+        },
+    );
     // `args` gets moved into the Container below; keep a copy for launch_log.
     let logged_args = args.clone();
 
@@ -884,12 +912,12 @@ mod tests {
     #[test]
     fn substitute_args_always_fills_in_name_and_accelerator_count() {
         let args = vec!["--name={{name}}".to_string(), "--tp={{accelerator_count}}".to_string()];
-        assert_eq!(substitute_args(&args, "alice-jupyter-abc123", None, None, None, None), vec![
+        assert_eq!(substitute_args(&args, "alice-jupyter-abc123", &ArgsContext::default()), vec![
             "--name=alice-jupyter-abc123",
             "--tp=1", // no accelerators requested -> defaults to 1, not 0
         ]);
         assert_eq!(
-            substitute_args(&args, "alice-jupyter-abc123", Some(4), None, None, None),
+            substitute_args(&args, "alice-jupyter-abc123", &ArgsContext { accelerator_count: Some(4), ..Default::default() }),
             vec!["--name=alice-jupyter-abc123", "--tp=4"]
         );
     }
@@ -900,27 +928,45 @@ mod tests {
             "--model={{model}}".to_string(),
             "--max-model-len={{context_length}}".to_string(),
             "--quantization={{quantization}}".to_string(),
+            "--served-model-name={{served_model_name}}".to_string(),
+            "--gpu-memory-utilization={{gpu_memory_utilization}}".to_string(),
+            "--dtype={{dtype}}".to_string(),
             "--always-here".to_string(),
         ];
         // Nothing set beyond the always-present ones: only the plain line survives.
-        assert_eq!(substitute_args(&args, "n", None, None, None, None), vec!["--always-here"]);
+        assert_eq!(substitute_args(&args, "n", &ArgsContext::default()), vec!["--always-here"]);
 
-        // Setting all three keeps all four lines, substituted.
-        assert_eq!(
-            substitute_args(&args, "n", None, Some("meta-llama/Llama-3-8B"), Some(8192), Some("awq")),
-            vec!["--model=meta-llama/Llama-3-8B", "--max-model-len=8192", "--quantization=awq", "--always-here"]
-        );
+        // Setting all six keeps all seven lines, substituted.
+        let all_set = ArgsContext {
+            model: Some("meta-llama/Llama-3-8B"),
+            context_length: Some(8192),
+            quantization: Some("awq"),
+            served_model_name: Some("llama-3"),
+            gpu_memory_utilization: Some(0.85),
+            dtype: Some("bfloat16"),
+            ..Default::default()
+        };
+        assert_eq!(substitute_args(&args, "n", &all_set), vec![
+            "--model=meta-llama/Llama-3-8B",
+            "--max-model-len=8192",
+            "--quantization=awq",
+            "--served-model-name=llama-3",
+            "--gpu-memory-utilization=0.85",
+            "--dtype=bfloat16",
+            "--always-here",
+        ]);
 
-        // Only model set: the other two optional lines are dropped, not left broken.
-        assert_eq!(
-            substitute_args(&args, "n", None, Some("meta-llama/Llama-3-8B"), None, None),
-            vec!["--model=meta-llama/Llama-3-8B", "--always-here"]
-        );
+        // Only model set: the other five optional lines are dropped, not left broken.
+        let only_model = ArgsContext { model: Some("meta-llama/Llama-3-8B"), ..Default::default() };
+        assert_eq!(substitute_args(&args, "n", &only_model), vec!["--model=meta-llama/Llama-3-8B", "--always-here"]);
     }
 
     #[test]
     fn substitute_args_treats_empty_strings_as_unset() {
         let args = vec!["--model={{model}}".to_string()];
-        assert_eq!(substitute_args(&args, "n", None, Some(""), None, None), Vec::<String>::new());
+        assert_eq!(
+            substitute_args(&args, "n", &ArgsContext { model: Some(""), ..Default::default() }),
+            Vec::<String>::new()
+        );
     }
 }

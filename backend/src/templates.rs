@@ -26,6 +26,9 @@ struct TemplateRow {
     model: String,
     context_length: Option<i64>,
     quantization: String,
+    served_model_name: String,
+    gpu_memory_utilization: Option<f64>,
+    dtype: String,
     volume_claim_name: String,
     volume_mount_path: String,
     volume_sub_path: String,
@@ -54,6 +57,9 @@ impl From<TemplateRow> for TemplateEntry {
             model: row.model,
             context_length: row.context_length,
             quantization: row.quantization,
+            served_model_name: row.served_model_name,
+            gpu_memory_utilization: row.gpu_memory_utilization,
+            dtype: row.dtype,
             volume_claim_name: row.volume_claim_name,
             volume_mount_path: row.volume_mount_path,
             volume_sub_path: row.volume_sub_path,
@@ -70,8 +76,8 @@ impl From<TemplateRow> for TemplateEntry {
 // into these queries with `AssertSqlSafe` below is not a SQL-injection risk.
 const SELECT_COLUMNS: &str = "id, name, image, container_port, cpu_request, cpu_limit, memory_request, \
      memory_limit, accelerator_type, accelerator_count, env, args, model, context_length, quantization, \
-     volume_claim_name, volume_mount_path, volume_sub_path, notes, secret_env_key, proxy_enabled, \
-     strip_prefix, public_service";
+     served_model_name, gpu_memory_utilization, dtype, volume_claim_name, volume_mount_path, \
+     volume_sub_path, notes, secret_env_key, proxy_enabled, strip_prefix, public_service";
 
 pub async fn list_templates(
     _user: CurrentUser,
@@ -91,9 +97,10 @@ pub async fn create_template(
     let sql = format!(
         "INSERT INTO templates (name, image, container_port, cpu_request, cpu_limit, memory_request, \
          memory_limit, accelerator_type, accelerator_count, env, args, model, context_length, quantization, \
-         volume_claim_name, volume_mount_path, volume_sub_path, notes, secret_env_key, proxy_enabled, \
-         strip_prefix, public_service) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22) \
+         served_model_name, gpu_memory_utilization, dtype, volume_claim_name, volume_mount_path, \
+         volume_sub_path, notes, secret_env_key, proxy_enabled, strip_prefix, public_service) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, \
+                 $20, $21, $22, $23, $24, $25) \
          RETURNING {SELECT_COLUMNS}"
     );
     let row: TemplateRow = sqlx::query_as(AssertSqlSafe(sql))
@@ -111,6 +118,9 @@ pub async fn create_template(
         .bind(&req.model)
         .bind(req.context_length)
         .bind(&req.quantization)
+        .bind(&req.served_model_name)
+        .bind(req.gpu_memory_utilization)
+        .bind(&req.dtype)
         .bind(&req.volume_claim_name)
         .bind(&req.volume_mount_path)
         .bind(&req.volume_sub_path)
@@ -134,10 +144,11 @@ pub async fn update_template(
     let sql = format!(
         "UPDATE templates SET name = $1, image = $2, container_port = $3, cpu_request = $4, cpu_limit = $5, \
          memory_request = $6, memory_limit = $7, accelerator_type = $8, accelerator_count = $9, env = $10, \
-         args = $11, model = $12, context_length = $13, quantization = $14, volume_claim_name = $15, \
-         volume_mount_path = $16, volume_sub_path = $17, notes = $18, secret_env_key = $19, \
-         proxy_enabled = $20, strip_prefix = $21, public_service = $22 \
-         WHERE id = $23 \
+         args = $11, model = $12, context_length = $13, quantization = $14, served_model_name = $15, \
+         gpu_memory_utilization = $16, dtype = $17, volume_claim_name = $18, volume_mount_path = $19, \
+         volume_sub_path = $20, notes = $21, secret_env_key = $22, proxy_enabled = $23, strip_prefix = $24, \
+         public_service = $25 \
+         WHERE id = $26 \
          RETURNING {SELECT_COLUMNS}"
     );
     let row: Option<TemplateRow> = sqlx::query_as(AssertSqlSafe(sql))
@@ -155,6 +166,9 @@ pub async fn update_template(
         .bind(&req.model)
         .bind(req.context_length)
         .bind(&req.quantization)
+        .bind(&req.served_model_name)
+        .bind(req.gpu_memory_utilization)
+        .bind(&req.dtype)
         .bind(&req.volume_claim_name)
         .bind(&req.volume_mount_path)
         .bind(&req.volume_sub_path)
@@ -199,10 +213,15 @@ fn validate_request(req: &SaveTemplateRequest) -> Result<(), ApiError> {
     validate::bounded_list("args", &req.args, 50, 1024)?;
     validate::optional_text("model", &req.model, 500)?;
     validate::optional_text("quantization", &req.quantization, 100)?;
+    validate::optional_text("served_model_name", &req.served_model_name, 200)?;
+    validate::optional_text("dtype", &req.dtype, 50)?;
     if let Some(n) = req.context_length
         && n <= 0
     {
         return Err(ApiError::BadRequest("context_length: must be positive".to_string()));
+    }
+    if let Some(f) = req.gpu_memory_utilization {
+        validate::fraction("gpu_memory_utilization", f)?;
     }
     validate::volume_mount(&req.volume_claim_name, &req.volume_mount_path)?;
     if req.notes.chars().count() > 2000 {

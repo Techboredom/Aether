@@ -37,6 +37,16 @@ pub fn optional_text(field: &str, value: &str, max_len: usize) -> Result<(), Api
     Ok(())
 }
 
+/// A fraction in `(0.0, 1.0]` — e.g. `gpu_memory_utilization`. `0.0` itself
+/// is rejected (nothing meaningful reserves none of the GPU); the caller
+/// only invokes this at all when the value is actually set.
+pub fn fraction(field: &str, value: f64) -> Result<(), ApiError> {
+    if !(value > 0.0 && value <= 1.0) {
+        return Err(bad(field, "must be greater than 0 and at most 1"));
+    }
+    Ok(())
+}
+
 /// A volume mount referencing an existing `PersistentVolumeClaim`:
 /// `claim_name`/`mount_path` must both be set or both be blank — a volume
 /// with nowhere to mount it, or a mount path with no claim backing it, is
@@ -325,6 +335,15 @@ mod tests {
         assert!(is_ok(optional_text("model", "meta-llama/Llama-3-8B", 500)));
         assert!(!is_ok(optional_text("model", &"x".repeat(11), 10)));
         assert!(!is_ok(optional_text("model", "bad\ntext", 500)));
+    }
+
+    #[test]
+    fn fraction_must_be_greater_than_zero_and_at_most_one() {
+        assert!(is_ok(fraction("gpu_memory_utilization", 0.9)));
+        assert!(is_ok(fraction("gpu_memory_utilization", 1.0)));
+        assert!(!is_ok(fraction("gpu_memory_utilization", 0.0)));
+        assert!(!is_ok(fraction("gpu_memory_utilization", 1.1)));
+        assert!(!is_ok(fraction("gpu_memory_utilization", -0.5)));
     }
 
     #[test]
