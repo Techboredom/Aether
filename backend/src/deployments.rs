@@ -2,11 +2,14 @@ use std::collections::BTreeMap;
 
 use axum::extract::{Path, State};
 use axum::Json;
-use common::{CreateDeploymentRequest, CreateDeploymentResponse, DeploymentDetail, LaunchLogEntry, PvcEntry, Role, UpdateDeploymentRequest};
-use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
+use common::{
+    CreateDeploymentRequest, CreateDeploymentResponse, DeploymentDetail, LaunchLogEntry, PvcEntry, RegenerateSecretResponse, Role,
+    UpdateDeploymentRequest,
+};
+use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec, ReplicaSet};
 use k8s_openapi::api::core::v1::{
-    Container, EnvVar, PersistentVolumeClaim, PersistentVolumeClaimVolumeSource, PodSpec, PodTemplateSpec,
-    ResourceRequirements, Service, ServicePort, ServiceSpec, Volume, VolumeMount,
+    Container, EnvVar, HTTPGetAction, PersistentVolumeClaim, PersistentVolumeClaimVolumeSource, PodSpec,
+    PodTemplateSpec, Probe, ResourceRequirements, Service, ServicePort, ServiceSpec, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
@@ -14,6 +17,8 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{Api, DeleteParams, ListParams, PostParams};
 use sqlx::types::Json as SqlxJson;
 use sqlx::FromRow;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 use crate::auth::{generate_name_suffix, generate_token, CurrentUser};
 use crate::error::ApiError;
@@ -199,6 +204,12 @@ pub async fn create_deployment(
     if req.enable_proxy && req.container_port.is_none() {
         return Err(ApiError::BadRequest("enable_proxy requires container_port".into()));
     }
+    if let Some(path) = req.readiness_path.as_deref().filter(|p| !p.is_empty()) {
+        validate::http_path("readiness_path", path)?;
+        if req.container_port.is_none() {
+            return Err(ApiError::BadRequest("readiness_path requires container_port".into()));
+        }
+    }
     validate::optional_text("model", req.model.as_deref().unwrap_or(""), 500)?;
     validate::optional_text("quantization", req.quantization.as_deref().unwrap_or(""), 100)?;
     validate::optional_text("served_model_name", req.served_model_name.as_deref().unwrap_or(""), 200)?;
@@ -349,6 +360,21 @@ pub async fn create_deployment(
         None => (None, None),
     };
 
+    // Generous timing: an LLM server can take minutes to load a model into
+    // GPU memory before it can answer `readiness_path` at all, and a probe
+    // that gives up too early would flap the pod in and out of Ready (or,
+    // behind the reverse proxy, serve connection-refused) for no reason.
+    let readiness_probe = req.readiness_path.as_deref().filter(|p| !p.is_empty()).and_then(|path| {
+        req.container_port.map(|port| Probe {
+            http_get: Some(HTTPGetAction { path: Some(path.to_string()), port: IntOrString::Int(port), ..Default::default() }),
+            initial_delay_seconds: Some(5),
+            period_seconds: Some(10),
+            failure_threshold: Some(60),
+            timeout_seconds: Some(5),
+            ..Default::default()
+        })
+    });
+
     // The selector must stay a fixed, minimal set of labels the pod template
     // always carries; `owner` rides along as an extra descriptive label on
     // top of it (on the Deployment, its pods, and the Service), not part of
@@ -390,6 +416,7 @@ pub async fn create_deployment(
                         env: (!env.is_empty()).then_some(env),
                         args: (!args.is_empty()).then_some(args),
                         volume_mounts,
+                        readiness_probe,
                         ..Default::default()
                     }],
                     ..Default::default()
@@ -816,6 +843,182 @@ pub async fn update_deployment(
         memory_request: req.memory_request,
         memory_limit: req.memory_limit,
         env: out_env,
+        generated_secret_key: secret_key,
+    }))
+}
+
+/// Sets `kubectl.kubernetes.io/restartedAt` on the pod template to the
+/// current time — the same convention `kubectl rollout restart` uses. It's
+/// the only thing that changes, but that's enough of a pod-template edit
+/// for the Deployment controller to roll every pod over via the existing
+/// `RollingUpdate` strategy, exactly as if any other field had changed.
+fn bump_restarted_at(deployment: &mut Deployment) {
+    let restarted_at = OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_else(|_| "restart".to_string());
+    if let Some(spec) = deployment.spec.as_mut() {
+        let metadata = spec.template.metadata.get_or_insert_with(ObjectMeta::default);
+        metadata.annotations.get_or_insert_with(BTreeMap::new).insert("kubectl.kubernetes.io/restartedAt".to_string(), restarted_at);
+    }
+}
+
+/// Restarts a Deployment the caller owns (or, for an admin, any
+/// Deployment) — e.g. to pick up a newly-mounted model file, or recover
+/// from a hung engine, without scaling to 0 and back up by hand.
+pub async fn restart_deployment(user: CurrentUser, State(state): State<AppState>, Path(name): Path<String>) -> Result<(), ApiError> {
+    let deployments: Api<Deployment> = Api::namespaced(state.client.clone(), &state.namespace);
+    let mut deployment = deployments.get(&name).await?;
+    check_owner(&deployment, &user)?;
+
+    bump_restarted_at(&mut deployment);
+    deployments.replace(&name, &PostParams::default(), &deployment).await?;
+    Ok(())
+}
+
+/// Regenerates a launched deployment's auto-generated credential (a
+/// JupyterLab token, a vLLM API key, ...) without deleting and relaunching
+/// it. 400s if this deployment was never launched with one — see
+/// `generated_secret`. Writes the new value to both `deployment_secrets`
+/// and the live container's env var, and — since an env var change only
+/// ever takes effect on a fresh pod, never hot-reloaded into a running one
+/// — restarts it the same way `restart_deployment` does, so the running
+/// pod is never left holding a credential Aether itself no longer knows.
+pub async fn regenerate_secret(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<RegenerateSecretResponse>, ApiError> {
+    let deployments: Api<Deployment> = Api::namespaced(state.client.clone(), &state.namespace);
+    let mut deployment = deployments.get(&name).await?;
+    check_owner(&deployment, &user)?;
+
+    let Some((key, _)) = generated_secret(&state.pg, &name).await? else {
+        return Err(ApiError::BadRequest("this deployment has no auto-generated credential to regenerate".to_string()));
+    };
+    let new_value = generate_token();
+    sqlx::query("UPDATE deployment_secrets SET secret_value = $1 WHERE deployment_name = $2")
+        .bind(&new_value)
+        .bind(&name)
+        .execute(&state.pg)
+        .await?;
+
+    bump_restarted_at(&mut deployment);
+    if let Some(container) =
+        deployment.spec.as_mut().and_then(|s| s.template.spec.as_mut()).and_then(|s| s.containers.first_mut())
+        && let Some(env) = container.env.as_mut()
+        && let Some(var) = env.iter_mut().find(|v| v.name == key)
+    {
+        var.value = Some(new_value.clone());
+    }
+    deployments.replace(&name, &PostParams::default(), &deployment).await?;
+    Ok(Json(RegenerateSecretResponse { secret_value: new_value }))
+}
+
+/// Rolls a Deployment back to its previous revision — the pod template
+/// (image, resources, env, everything) exactly as it was immediately
+/// before the most recent edit. The same mechanism `kubectl rollout undo`
+/// uses: Kubernetes already keeps old `ReplicaSet`s around specifically
+/// for this (up to `spec.revisionHistoryLimit`, default 10, tracked via
+/// their own `deployment.kubernetes.io/revision` annotation) — this just
+/// finds the right one and copies its template back onto the Deployment,
+/// the same fetch-mutate-replace shape as `update_deployment`.
+///
+/// Deliberately "undo the last change" rather than a full revision picker:
+/// simpler to build and to reason about, and it's what actually closes the
+/// "a bad edit just needs manually editing it back" gap.
+pub async fn rollback_deployment(
+    user: CurrentUser,
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<DeploymentDetail>, ApiError> {
+    let deployments: Api<Deployment> = Api::namespaced(state.client.clone(), &state.namespace);
+    let mut deployment = deployments.get(&name).await?;
+    check_owner(&deployment, &user)?;
+    let deployment_uid = deployment.metadata.uid.clone();
+
+    let selector = deployment
+        .spec
+        .as_ref()
+        .and_then(|s| s.selector.match_labels.as_ref())
+        .map(|labels| labels.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(","))
+        .unwrap_or_default();
+    let replica_sets: Api<ReplicaSet> = Api::namespaced(state.client.clone(), &state.namespace);
+    let list = replica_sets.list(&ListParams::default().labels(&selector)).await?;
+
+    // The label selector alone could in principle match something outside
+    // this Deployment's own history; only trust ones it actually owns.
+    // Sorted newest revision first: [0] is the current one (what's live
+    // right now), [1] is what it was immediately before the last change.
+    let mut owned: Vec<ReplicaSet> = list
+        .items
+        .into_iter()
+        .filter(|rs| {
+            rs.metadata.owner_references.as_ref().is_some_and(|refs| refs.iter().any(|r| Some(&r.uid) == deployment_uid.as_ref()))
+        })
+        .collect();
+    owned.sort_by_key(|rs| {
+        rs.metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get("deployment.kubernetes.io/revision"))
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0)
+    });
+    owned.reverse();
+
+    let Some(previous) = owned.get(1) else {
+        return Err(ApiError::BadRequest("no previous revision to roll back to".to_string()));
+    };
+    let previous_template = previous
+        .spec
+        .as_ref()
+        .and_then(|s| s.template.clone())
+        .ok_or_else(|| ApiError::BadRequest("the previous revision has no pod template on record".to_string()))?;
+
+    // Quota-checked the same way update_deployment is — a rollback can
+    // just as easily increase resource usage as decrease it (rolling back
+    // *away from* a scale-down, for instance).
+    let replicas = i64::from(deployment.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1));
+    let prev_container = previous_template.spec.as_ref().and_then(|s| s.containers.first());
+    let prev_limits = prev_container.and_then(|c| c.resources.as_ref()).and_then(|r| r.limits.as_ref());
+    let additional_cpu = prev_limits.and_then(|l| l.get("cpu")).and_then(parse_cpu_millicores).unwrap_or(0) * replicas;
+    let additional_memory = prev_limits.and_then(|l| l.get("memory")).and_then(parse_memory_bytes).unwrap_or(0) * replicas;
+    let additional_gpu: i64 = prev_limits
+        .map(|limits| limits.iter().filter(|(k, _)| k.as_str() != "cpu" && k.as_str() != "memory").filter_map(|(_, q)| parse_count(q)).sum())
+        .unwrap_or(0)
+        * replicas;
+    let launch_tx = state.lock_launches().await?;
+    quota::check_quota(&state, &user, Some(&name), additional_cpu, additional_memory, additional_gpu).await?;
+
+    if let Some(spec) = deployment.spec.as_mut() {
+        spec.template = previous_template;
+    }
+    let updated = deployments.replace(&name, &PostParams::default(), &deployment).await?;
+    launch_tx.commit().await?;
+
+    // Same response shape as get_deployment/update_deployment.
+    let secret = generated_secret(&state.pg, &name).await?;
+    let secret_key = secret.map(|(key, _)| key);
+    let container = updated.spec.as_ref().and_then(|s| s.template.spec.as_ref()).and_then(|s| s.containers.first());
+    let resources = container.and_then(|c| c.resources.as_ref());
+    let quantity =
+        |map: Option<&BTreeMap<String, Quantity>>, key: &str| map.and_then(|m| m.get(key)).map(|q| q.0.clone());
+    let env: Vec<(String, String)> = container
+        .and_then(|c| c.env.as_ref())
+        .map(|vars| {
+            vars.iter()
+                .filter(|v| Some(&v.name) != secret_key.as_ref())
+                .map(|v| (v.name.clone(), v.value.clone().unwrap_or_default()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(Json(DeploymentDetail {
+        name,
+        replicas: updated.spec.as_ref().and_then(|s| s.replicas).unwrap_or(0),
+        cpu_request: quantity(resources.and_then(|r| r.requests.as_ref()), "cpu"),
+        cpu_limit: quantity(resources.and_then(|r| r.limits.as_ref()), "cpu"),
+        memory_request: quantity(resources.and_then(|r| r.requests.as_ref()), "memory"),
+        memory_limit: quantity(resources.and_then(|r| r.limits.as_ref()), "memory"),
+        env,
         generated_secret_key: secret_key,
     }))
 }

@@ -203,6 +203,15 @@ pub struct CreateDeploymentRequest {
     /// selected template's `public_service`.
     #[serde(default = "default_true")]
     pub public_service: bool,
+    /// HTTP path for a `readinessProbe` against `container_port` (e.g.
+    /// `"/health"`) — without one, Kubernetes considers the container Ready
+    /// the instant its process starts, which for a slow-loading LLM server
+    /// means traffic (and the Pods tab's "Ready" status) arrives well
+    /// before it can actually answer requests. Empty means no probe.
+    /// Requires `container_port`. Comes from the selected template's
+    /// `readiness_path`.
+    #[serde(default)]
+    pub readiness_path: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -226,6 +235,12 @@ pub struct CreateDeploymentResponse {
     /// someone to go check `kubectl get svc` for an external IP that
     /// doesn't exist.
     pub public_service: bool,
+}
+
+/// Returned by `POST /api/deployments/{name}/regenerate-secret`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RegenerateSecretResponse {
+    pub secret_value: String,
 }
 
 /// Current editable state of a running Deployment, returned by `GET
@@ -334,6 +349,8 @@ pub struct TemplateEntry {
     /// with `DISABLE_AUTH=true`), since Aether's own login is then the only
     /// gate.
     pub public_service: bool,
+    /// See `CreateDeploymentRequest::readiness_path`. Empty means no probe.
+    pub readiness_path: String,
 }
 
 /// Submitted by the Templates admin tab to create or update a template.
@@ -364,6 +381,7 @@ pub struct SaveTemplateRequest {
     pub proxy_enabled: bool,
     pub strip_prefix: bool,
     pub public_service: bool,
+    pub readiness_path: String,
 }
 
 /// An existing `PersistentVolumeClaim` in the watched namespace, for the

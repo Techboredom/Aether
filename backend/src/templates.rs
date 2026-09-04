@@ -37,6 +37,7 @@ struct TemplateRow {
     proxy_enabled: bool,
     strip_prefix: bool,
     public_service: bool,
+    readiness_path: String,
 }
 
 impl From<TemplateRow> for TemplateEntry {
@@ -68,6 +69,7 @@ impl From<TemplateRow> for TemplateEntry {
             proxy_enabled: row.proxy_enabled,
             strip_prefix: row.strip_prefix,
             public_service: row.public_service,
+            readiness_path: row.readiness_path,
         }
     }
 }
@@ -77,7 +79,7 @@ impl From<TemplateRow> for TemplateEntry {
 const SELECT_COLUMNS: &str = "id, name, image, container_port, cpu_request, cpu_limit, memory_request, \
      memory_limit, accelerator_type, accelerator_count, env, args, model, context_length, quantization, \
      served_model_name, gpu_memory_utilization, dtype, volume_claim_name, volume_mount_path, \
-     volume_sub_path, notes, secret_env_key, proxy_enabled, strip_prefix, public_service";
+     volume_sub_path, notes, secret_env_key, proxy_enabled, strip_prefix, public_service, readiness_path";
 
 pub async fn list_templates(
     _user: CurrentUser,
@@ -98,9 +100,9 @@ pub async fn create_template(
         "INSERT INTO templates (name, image, container_port, cpu_request, cpu_limit, memory_request, \
          memory_limit, accelerator_type, accelerator_count, env, args, model, context_length, quantization, \
          served_model_name, gpu_memory_utilization, dtype, volume_claim_name, volume_mount_path, \
-         volume_sub_path, notes, secret_env_key, proxy_enabled, strip_prefix, public_service) \
+         volume_sub_path, notes, secret_env_key, proxy_enabled, strip_prefix, public_service, readiness_path) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, \
-                 $20, $21, $22, $23, $24, $25) \
+                 $20, $21, $22, $23, $24, $25, $26) \
          RETURNING {SELECT_COLUMNS}"
     );
     let row: TemplateRow = sqlx::query_as(AssertSqlSafe(sql))
@@ -129,6 +131,7 @@ pub async fn create_template(
         .bind(req.proxy_enabled)
         .bind(req.strip_prefix)
         .bind(req.public_service)
+        .bind(&req.readiness_path)
         .fetch_one(&state.pg)
         .await?;
     Ok(Json(row.into()))
@@ -147,8 +150,8 @@ pub async fn update_template(
          args = $11, model = $12, context_length = $13, quantization = $14, served_model_name = $15, \
          gpu_memory_utilization = $16, dtype = $17, volume_claim_name = $18, volume_mount_path = $19, \
          volume_sub_path = $20, notes = $21, secret_env_key = $22, proxy_enabled = $23, strip_prefix = $24, \
-         public_service = $25 \
-         WHERE id = $26 \
+         public_service = $25, readiness_path = $26 \
+         WHERE id = $27 \
          RETURNING {SELECT_COLUMNS}"
     );
     let row: Option<TemplateRow> = sqlx::query_as(AssertSqlSafe(sql))
@@ -177,6 +180,7 @@ pub async fn update_template(
         .bind(req.proxy_enabled)
         .bind(req.strip_prefix)
         .bind(req.public_service)
+        .bind(&req.readiness_path)
         .bind(id)
         .fetch_optional(&state.pg)
         .await?;
@@ -229,6 +233,12 @@ fn validate_request(req: &SaveTemplateRequest) -> Result<(), ApiError> {
     }
     if let Some(key) = &req.secret_env_key {
         validate::env_key(key)?;
+    }
+    if !req.readiness_path.is_empty() {
+        validate::http_path("readiness_path", &req.readiness_path)?;
+        if req.container_port.is_none() {
+            return Err(ApiError::BadRequest("readiness_path requires container_port".to_string()));
+        }
     }
     Ok(())
 }

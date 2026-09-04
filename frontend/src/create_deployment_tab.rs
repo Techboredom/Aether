@@ -25,6 +25,7 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
     let image = RwSignal::new(String::new());
     let replicas = RwSignal::new("1".to_string());
     let container_port = RwSignal::new(String::new());
+    let readiness_path = RwSignal::new(String::new());
     let cpu_request = RwSignal::new(String::new());
     let cpu_limit = RwSignal::new(String::new());
     let memory_request = RwSignal::new(String::new());
@@ -98,6 +99,7 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
         notes.set(if t.notes.trim().is_empty() { None } else { Some(t.notes.clone()) });
         image.set(t.image.clone());
         container_port.set(t.container_port.map(|p| p.to_string()).unwrap_or_default());
+        readiness_path.set(t.readiness_path.clone());
         cpu_request.set(t.cpu_request.clone());
         cpu_limit.set(t.cpu_limit.clone());
         memory_request.set(t.memory_request.clone());
@@ -129,6 +131,7 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
         notes.set(None);
         image.set(String::new());
         container_port.set(String::new());
+        readiness_path.set(String::new());
         cpu_request.set(String::new());
         cpu_limit.set(String::new());
         memory_request.set(String::new());
@@ -190,6 +193,7 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
             accelerator_type: if accel_type.is_empty() { None } else { Some(accel_type) },
             accelerator_count: accel_count,
             container_port: container_port.get().trim().parse().ok(),
+            readiness_path: non_empty(readiness_path.get()),
             env: env_vars.to_pairs(),
             args,
             model: non_empty(model.get()),
@@ -309,6 +313,16 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
                         placeholder="e.g. 8080 — creates a LoadBalancer Service"
                         prop:value=move || container_port.get()
                         on:input=move |ev| container_port.set(event_target_value(&ev))
+                    />
+                </label>
+
+                <label>
+                    "Readiness probe path (optional)"
+                    <input
+                        type="text"
+                        placeholder="e.g. /health — requires a container port"
+                        prop:value=move || readiness_path.get()
+                        on:input=move |ev| readiness_path.set(event_target_value(&ev))
                     />
                 </label>
 

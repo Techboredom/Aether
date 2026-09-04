@@ -18,6 +18,7 @@ pub fn TemplatesTab() -> impl IntoView {
     let name = RwSignal::new(String::new());
     let image = RwSignal::new(String::new());
     let container_port = RwSignal::new(String::new());
+    let readiness_path = RwSignal::new(String::new());
     let cpu_request = RwSignal::new(String::new());
     let cpu_limit = RwSignal::new(String::new());
     let memory_request = RwSignal::new(String::new());
@@ -70,6 +71,7 @@ pub fn TemplatesTab() -> impl IntoView {
         name.set(String::new());
         image.set(String::new());
         container_port.set(String::new());
+        readiness_path.set(String::new());
         cpu_request.set(String::new());
         cpu_limit.set(String::new());
         memory_request.set(String::new());
@@ -99,6 +101,7 @@ pub fn TemplatesTab() -> impl IntoView {
         name.set(t.name.clone());
         image.set(t.image.clone());
         container_port.set(t.container_port.map(|p| p.to_string()).unwrap_or_default());
+        readiness_path.set(t.readiness_path.clone());
         cpu_request.set(t.cpu_request.clone());
         cpu_limit.set(t.cpu_limit.clone());
         memory_request.set(t.memory_request.clone());
@@ -158,6 +161,7 @@ pub fn TemplatesTab() -> impl IntoView {
             name: name.get().trim().to_string(),
             image: image.get().trim().to_string(),
             container_port: container_port.get().trim().parse().ok(),
+            readiness_path: readiness_path.get().trim().to_string(),
             cpu_request: cpu_request.get().trim().to_string(),
             cpu_limit: cpu_limit.get().trim().to_string(),
             memory_request: memory_request.get().trim().to_string(),
@@ -294,6 +298,16 @@ pub fn TemplatesTab() -> impl IntoView {
                         step="1"
                         prop:value=move || container_port.get()
                         on:input=move |ev| container_port.set(event_target_value(&ev))
+                    />
+                </label>
+
+                <label>
+                    "Readiness probe path (optional)"
+                    <input
+                        type="text"
+                        placeholder="e.g. /health — requires a container port"
+                        prop:value=move || readiness_path.get()
+                        on:input=move |ev| readiness_path.set(event_target_value(&ev))
                     />
                 </label>
 
