@@ -1,5 +1,4 @@
-- **No Deployment lifecycle management** — Launch-only; nothing in the UI to delete/scale/edit a running deployment afterward
-- **Single-namespace only**
-- **Semantic Versioning**
-- **User Resource Quotas**
-- **User Resource Quota Visibility**
+** SSO/LDAP **
+** Remove uneeded info from pods page and the launch tab **
+** Help text for launch fields **
+** Home Drives **
