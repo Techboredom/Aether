@@ -151,6 +151,21 @@ jobs:
           git clone "https://${{ secrets.AETHER_DEPLOY_TOKEN }}@$DEPLOY_REPO" /tmp/aether-deploy
           cd /tmp/aether-deploy
 
+          # $TAG names an image in *this* registry, so only rewrite the tag
+          # when values.yaml is actually pointing here. When it points
+          # somewhere else - as it does while the cluster pulls public
+          # release images from GHCR, because the nodes' containerd doesn't
+          # trust this registry's CA - a bump would pair that repository
+          # with a tag that only exists here and produce an image that
+          # cannot be pulled at all. Failing to deploy a new build is a
+          # nuisance; silently breaking the running one is not.
+          if ! grep -q "^  repository: $REGISTRY" values.yaml; then
+            echo "values.yaml does not point at $REGISTRY - leaving image.tag alone."
+            echo "Deploy this build by pointing image.repository back here, or"
+            echo "let the GitHub release workflow publish a tagged image instead."
+            exit 0
+          fi
+
           # values.yaml has exactly one `tag:` key, two spaces deep under
           # `image:` - a plain sed edit rather than pulling in yq for a
           # one-line change to a small, hand-maintained file.

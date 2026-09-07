@@ -324,8 +324,46 @@ h1 {
   overflow-x: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  background: var(--surface);
   -webkit-overflow-scrolling: touch;
+
+  /* Scroll affordance. This table is wider than the panel on most screens
+     and nothing previously said so. The first pair of gradients are
+     "covers" painted in the surface colour and attached to the content
+     (`local`), so they slide away as you scroll; the second pair are the
+     shadows themselves, pinned to the viewport (`scroll`). The net effect
+     is a soft shadow on an edge only while there is more table past it —
+     and it disappears once you reach the end, so it never lies. */
+  background:
+    linear-gradient(to right, var(--surface) 40%, rgba(0, 0, 0, 0)) 0 0 / 44px 100% no-repeat local,
+    linear-gradient(to left, var(--surface) 40%, rgba(0, 0, 0, 0)) 100% 0 / 44px 100% no-repeat local,
+    linear-gradient(to right, rgba(0, 0, 0, 0.34), rgba(0, 0, 0, 0)) 0 0 / 18px 100% no-repeat scroll,
+    linear-gradient(to left, rgba(0, 0, 0, 0.34), rgba(0, 0, 0, 0)) 100% 0 / 18px 100% no-repeat scroll;
+  background-color: var(--surface);
+
+  /* macOS hides overlay scrollbars until something is already scrolling,
+     which is exactly the wrong default here. Force a permanently visible
+     one so the table reads as scrollable at rest. */
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.table-wrap::-webkit-scrollbar {
+  height: 10px;
+}
+
+.table-wrap::-webkit-scrollbar-track {
+  background: var(--page);
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+}
+
+.table-wrap::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 5px;
+  border: 2px solid var(--page);
+}
+
+.table-wrap::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
 }
 
 table {
@@ -690,11 +728,39 @@ tbody tr:hover {
   align-self: flex-start;
 }
 
+/* "Open" is the one thing most people come to this tab to do, so it wears
+   the accent rather than the same recessive outline as everything else. */
+.credential .icon-button.primary-action {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 500;
+}
+
+.credential .icon-button.primary-action:hover {
+  filter: brightness(1.1);
+}
+
 .credential-key {
   font-size: 10px;
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.03em;
+}
+
+/* The in-cluster address. Deliberately muted rather than wearing
+   .credential-value's green: that colour marks a secret, and this is a
+   DNS name that is safe to read out. */
+.access-internal {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--page);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  user-select: all;
+  align-self: flex-start;
 }
 
 .credential-value {

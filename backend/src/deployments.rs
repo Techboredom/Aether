@@ -84,11 +84,13 @@ fn scoped_deployment_name(username: &str, instance_type: &str) -> String {
 /// Substitutes each `args` line's placeholders and drops lines that
 /// reference an unset optional one.
 ///
-/// `{{name}}` (the deployment's own generated name) and
-/// `{{accelerator_count}}` (however many accelerators were requested,
-/// defaulting to `1` if none were — so a template whose args always
-/// reference it, e.g. vLLM's `--tensor-parallel-size`, doesn't end up with
-/// a nonsensical 0) always have a value, so they're always substituted.
+/// `{{name}}` (the deployment's own generated name),
+/// `{{proxy_root_path}}` (the URL prefix it's served under — see
+/// [`proxy_root_path`]), and `{{accelerator_count}}` (however many
+/// accelerators were requested, defaulting to `1` if none were — so a
+/// template whose args always reference it, e.g. vLLM's
+/// `--tensor-parallel-size`, doesn't end up with a nonsensical 0) always
+/// have a value, so they're always substituted.
 ///
 /// Everything else in `ArgsContext` is genuinely optional — substituting an
 /// empty string for an unset one would send a broken `--flag=` with
@@ -111,7 +113,23 @@ struct ArgsContext<'a> {
     dtype: Option<&'a str>,
 }
 
-fn substitute_args(raw_args: &[String], name: &str, ctx: &ArgsContext) -> Vec<String> {
+/// The URL prefix a proxied app is reached under, which it needs in order to
+/// generate correct links back to itself.
+///
+/// With per-deployment origins the app owns a whole origin and sits at the
+/// root, so this is `/`. In the legacy same-origin mode it's served beneath
+/// `/proxy/<name>/` and must say so. Getting this wrong is not a subtle
+/// failure: RStudio told the old prefix on a per-deployment origin redirects
+/// to `/proxy/<name>/auth-sign-in`, a path it doesn't serve, and answers its
+/// own redirect with "The requested page was not found."
+fn proxy_root_path(state: &AppState, name: &str) -> String {
+    match state.proxy_origin {
+        Some(_) => "/".to_string(),
+        None => format!("/proxy/{name}/"),
+    }
+}
+
+fn substitute_args(raw_args: &[String], name: &str, root_path: &str, ctx: &ArgsContext) -> Vec<String> {
     let accelerator_count_str = ctx.accelerator_count.filter(|&c| c > 0).unwrap_or(1).to_string();
     let optional_placeholders: [(&str, Option<String>); 6] = [
         ("{{model}}", ctx.model.filter(|s| !s.is_empty()).map(str::to_string)),
@@ -124,7 +142,11 @@ fn substitute_args(raw_args: &[String], name: &str, ctx: &ArgsContext) -> Vec<St
     raw_args
         .iter()
         .filter_map(|raw| {
-            let mut arg = raw.trim().replace("{{name}}", name).replace("{{accelerator_count}}", &accelerator_count_str);
+            let mut arg = raw
+                .trim()
+                .replace("{{name}}", name)
+                .replace("{{proxy_root_path}}", root_path)
+                .replace("{{accelerator_count}}", &accelerator_count_str);
             for (token, value) in &optional_placeholders {
                 if arg.contains(token) {
                     match value {
@@ -340,6 +362,7 @@ pub async fn create_deployment(
     let args = substitute_args(
         &req.args,
         &scoped_name,
+        &proxy_root_path(&state, &scoped_name),
         &ArgsContext {
             accelerator_count: req.accelerator_count,
             model: req.model.as_deref(),
@@ -1136,14 +1159,40 @@ mod tests {
     #[test]
     fn substitute_args_always_fills_in_name_and_accelerator_count() {
         let args = vec!["--name={{name}}".to_string(), "--tp={{accelerator_count}}".to_string()];
-        assert_eq!(substitute_args(&args, "alice-jupyter-abc123", &ArgsContext::default()), vec![
+        assert_eq!(substitute_args(&args, "alice-jupyter-abc123", "/", &ArgsContext::default()), vec![
             "--name=alice-jupyter-abc123",
             "--tp=1", // no accelerators requested -> defaults to 1, not 0
         ]);
         assert_eq!(
-            substitute_args(&args, "alice-jupyter-abc123", &ArgsContext { accelerator_count: Some(4), ..Default::default() }),
+            substitute_args(&args, "alice-jupyter-abc123", "/", &ArgsContext { accelerator_count: Some(4), ..Default::default() }),
             vec!["--name=alice-jupyter-abc123", "--tp=4"]
         );
+    }
+
+    /// The RStudio template's actual args. On a per-deployment origin the app
+    /// sits at the root; told the legacy prefix instead, rserver redirects to
+    /// `/proxy/<name>/auth-sign-in` — which it doesn't serve — and answers its
+    /// own redirect with "The requested page was not found."
+    #[test]
+    fn substitute_args_fills_in_the_proxy_root_path() {
+        let args = vec![
+            "echo \"www-root-path={{proxy_root_path}}\" >> /etc/rstudio/disable_auth_rserver.conf".to_string(),
+        ];
+        assert_eq!(substitute_args(&args, "admin-rstudio-hdxyuy", "/", &ArgsContext::default()), vec![
+            "echo \"www-root-path=/\" >> /etc/rstudio/disable_auth_rserver.conf"
+        ]);
+        assert_eq!(
+            substitute_args(&args, "admin-rstudio-hdxyuy", "/proxy/admin-rstudio-hdxyuy/", &ArgsContext::default()),
+            vec!["echo \"www-root-path=/proxy/admin-rstudio-hdxyuy/\" >> /etc/rstudio/disable_auth_rserver.conf"]
+        );
+    }
+
+    /// Unlike the optional model-serving placeholders, an unset root path is
+    /// not a thing: the line must survive substitution either way.
+    #[test]
+    fn a_root_path_line_is_never_dropped() {
+        let args = vec!["--root={{proxy_root_path}}".to_string()];
+        assert_eq!(substitute_args(&args, "n", "/", &ArgsContext::default()), vec!["--root=/"]);
     }
 
     #[test]
@@ -1158,7 +1207,7 @@ mod tests {
             "--always-here".to_string(),
         ];
         // Nothing set beyond the always-present ones: only the plain line survives.
-        assert_eq!(substitute_args(&args, "n", &ArgsContext::default()), vec!["--always-here"]);
+        assert_eq!(substitute_args(&args, "n", "/", &ArgsContext::default()), vec!["--always-here"]);
 
         // Setting all six keeps all seven lines, substituted.
         let all_set = ArgsContext {
@@ -1170,7 +1219,7 @@ mod tests {
             dtype: Some("bfloat16"),
             ..Default::default()
         };
-        assert_eq!(substitute_args(&args, "n", &all_set), vec![
+        assert_eq!(substitute_args(&args, "n", "/", &all_set), vec![
             "--model=meta-llama/Llama-3-8B",
             "--max-model-len=8192",
             "--quantization=awq",
@@ -1182,14 +1231,14 @@ mod tests {
 
         // Only model set: the other five optional lines are dropped, not left broken.
         let only_model = ArgsContext { model: Some("meta-llama/Llama-3-8B"), ..Default::default() };
-        assert_eq!(substitute_args(&args, "n", &only_model), vec!["--model=meta-llama/Llama-3-8B", "--always-here"]);
+        assert_eq!(substitute_args(&args, "n", "/", &only_model), vec!["--model=meta-llama/Llama-3-8B", "--always-here"]);
     }
 
     #[test]
     fn substitute_args_treats_empty_strings_as_unset() {
         let args = vec!["--model={{model}}".to_string()];
         assert_eq!(
-            substitute_args(&args, "n", &ArgsContext { model: Some(""), ..Default::default() }),
+            substitute_args(&args, "n", "/", &ArgsContext { model: Some(""), ..Default::default() }),
             Vec::<String>::new()
         );
     }

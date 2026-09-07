@@ -31,10 +31,33 @@ pub struct PodInfo {
     /// token, RStudio password, vLLM API key, ...), if its template has one.
     /// Only populated for pods the requester is allowed to see.
     pub credential: Option<PodCredential>,
-    /// If its template is proxy-enabled, the root-relative path
-    /// (`/proxy/<deployment-name>/`) that opens it through Aether itself
-    /// with the credential already injected — no login prompt, no public IP.
+    /// If its template is proxy-enabled, the URL that opens it through
+    /// Aether itself with the credential already injected — no login
+    /// prompt, no public IP. A full origin
+    /// (`https://<deployment-name>.<proxy base domain>/`) when
+    /// per-deployment proxy origins are configured, otherwise the legacy
+    /// root-relative `/proxy/<deployment-name>/`.
     pub proxy_path: Option<String>,
+    /// How to reach this deployment's own Service, if it has one. Distinct
+    /// from `proxy_path`: that goes through Aether and requires an Aether
+    /// session, which is right for a browser but unusable for a program
+    /// (a coding tool pointed at vLLM's OpenAI-compatible API can't log
+    /// in). This is the direct address.
+    pub access: Option<PodAccess>,
+}
+
+/// Where a deployment's Service can actually be reached.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PodAccess {
+    /// In-cluster DNS address (`<service>.<namespace>.svc.cluster.local:<port>`).
+    /// Always present when a Service exists, but only resolvable from
+    /// inside the cluster — never a browser link.
+    pub internal: String,
+    /// Browser-reachable `http://<external-ip>:<port>`, present only for a
+    /// `LoadBalancer` Service that has actually been assigned an address.
+    /// A `LoadBalancer` still pending an IP yields `None`, which is
+    /// correct: there is nothing to click yet.
+    pub external_url: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -47,6 +47,12 @@ pub fn TemplatesTab() -> impl IntoView {
     let saving = RwSignal::new(false);
     let form_result: RwSignal<Option<Result<String, String>>> = RwSignal::new(None);
 
+    // Show a model-serving field only once this template's own args
+    // reference its placeholder — same rule, and the same reasoning, as in
+    // create_deployment_tab.rs. Type `--model={{model}}` into Args below
+    // and the Model field appears.
+    let uses = move |placeholder: &'static str| move || args_text.get().contains(placeholder);
+
     let refresh = move || {
         spawn_local(async move {
             match api::get_json::<Vec<TemplateEntry>>("/api/templates").await {
@@ -387,74 +393,86 @@ pub fn TemplatesTab() -> impl IntoView {
                     <EnvVarsEditor vars=env_vars />
                 </fieldset>
 
-                <label>
-                    "Model (optional)"
-                    <input
-                        type="text"
-                        maxlength="500"
-                        placeholder="e.g. meta-llama/Llama-3-8B, or a local path under the mount below"
-                        prop:value=move || model.get()
-                        on:input=move |ev| model.set(event_target_value(&ev))
-                    />
-                </label>
+                <Show when=uses("{{model}}")>
+                    <label>
+                        "Model (optional)"
+                        <input
+                            type="text"
+                            maxlength="500"
+                            placeholder="e.g. meta-llama/Llama-3-8B, or a local path under the mount below"
+                            prop:value=move || model.get()
+                            on:input=move |ev| model.set(event_target_value(&ev))
+                        />
+                    </label>
+                </Show>
 
-                <label>
-                    "Context length (optional)"
-                    <input
-                        type="number"
-                        min="1"
-                        step="1"
-                        placeholder="e.g. 8192"
-                        prop:value=move || context_length.get()
-                        on:input=move |ev| context_length.set(event_target_value(&ev))
-                    />
-                </label>
+                <Show when=uses("{{context_length}}")>
+                    <label>
+                        "Context length (optional)"
+                        <input
+                            type="number"
+                            min="1"
+                            step="1"
+                            placeholder="e.g. 8192"
+                            prop:value=move || context_length.get()
+                            on:input=move |ev| context_length.set(event_target_value(&ev))
+                        />
+                    </label>
+                </Show>
 
-                <label>
-                    "Quantization (optional)"
-                    <input
-                        type="text"
-                        maxlength="100"
-                        placeholder="e.g. awq, gptq, fp8"
-                        prop:value=move || quantization.get()
-                        on:input=move |ev| quantization.set(event_target_value(&ev))
-                    />
-                </label>
+                <Show when=uses("{{quantization}}")>
+                    <label>
+                        "Quantization (optional)"
+                        <input
+                            type="text"
+                            maxlength="100"
+                            placeholder="e.g. awq, gptq, fp8"
+                            prop:value=move || quantization.get()
+                            on:input=move |ev| quantization.set(event_target_value(&ev))
+                        />
+                    </label>
+                </Show>
 
-                <label>
-                    "Served model name (optional)"
-                    <input
-                        type="text"
-                        maxlength="200"
-                        placeholder="a short name for the OpenAI-compatible API, if different from Model"
-                        prop:value=move || served_model_name.get()
-                        on:input=move |ev| served_model_name.set(event_target_value(&ev))
-                    />
-                </label>
+                <Show when=uses("{{served_model_name}}")>
+                    <label>
+                        "Served model name (optional)"
+                        <input
+                            type="text"
+                            maxlength="200"
+                            placeholder="a short name for the OpenAI-compatible API, if different from Model"
+                            prop:value=move || served_model_name.get()
+                            on:input=move |ev| served_model_name.set(event_target_value(&ev))
+                        />
+                    </label>
+                </Show>
 
-                <label>
-                    "GPU memory utilization (optional)"
-                    <input
-                        type="number"
-                        min="0.01"
-                        max="1"
-                        step="0.01"
-                        placeholder="e.g. 0.9 — fraction of GPU memory to reserve"
-                        prop:value=move || gpu_memory_utilization.get()
-                        on:input=move |ev| gpu_memory_utilization.set(event_target_value(&ev))
-                    />
-                </label>
+                <Show when=uses("{{gpu_memory_utilization}}")>
+                    <label>
+                        "GPU memory utilization (optional)"
+                        <input
+                            type="number"
+                            min="0.01"
+                            max="1"
+                            step="0.01"
+                            placeholder="e.g. 0.9 — fraction of GPU memory to reserve"
+                            prop:value=move || gpu_memory_utilization.get()
+                            on:input=move |ev| gpu_memory_utilization.set(event_target_value(&ev))
+                        />
+                    </label>
+                </Show>
 
-                <label>
-                    "Dtype (optional)"
-                    <input
-                        type="text"
-                        maxlength="50"
-                        placeholder="e.g. float16, bfloat16, auto"
-                        prop:value=move || dtype.get()
-                        on:input=move |ev| dtype.set(event_target_value(&ev))
-                    />
-                </label>
+                <Show when=uses("{{dtype}}")>
+                    <label>
+                        "Dtype (optional)"
+                        <input
+                            type="text"
+                            maxlength="50"
+                            placeholder="e.g. float16, bfloat16, auto"
+                            prop:value=move || dtype.get()
+                            on:input=move |ev| dtype.set(event_target_value(&ev))
+                        />
+                    </label>
+                </Show>
 
                 <fieldset>
                     <legend>"Storage mount (optional)"</legend>
