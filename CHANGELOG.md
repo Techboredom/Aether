@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-07
+
+### Added
+
+- A favicon and a real page title. The tab previously read "Pods" and had
+  the browser's default document icon; it now carries the Aether mark
+  (`frontend/aether-mark.svg`, copied to the dist root by trunk) and is
+  titled "Aether".
+
+- A background treatment shared with the marketing site, so the two read as
+  one product: a fine graph-paper grid behind the whole app, plus drifting
+  radial glows and a sparse starfield on the login screen. Driven by theme
+  tokens (`--grid-line`, `--star`, `--glow-a/b`) rather than literals, so
+  light mode re-pitches the treatment instead of inheriting a dimmed dark
+  one — notably `--star: transparent`, since dots on a light background
+  read as dust rather than space.
+
+  The glows and starfield are deliberately scoped to the login screen. The
+  tabs are dense tables and forms, where a starfield would be decoration
+  sitting on top of the thing someone is trying to read; there the grid
+  alone fills the gutters. The drift animation is disabled under
+  `prefers-reduced-motion`.
+
 ## [0.3.0] - 2026-09-07
 
 ### Added
@@ -232,6 +255,9 @@ own cluster.
   section still listed it as missing, contradicting the security-notes
   section describing the throttle).
 
-[Unreleased]: https://github.com/Techboredom/Aether/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Techboredom/Aether/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/Techboredom/Aether/releases/tag/v0.3.1
+[0.3.0]: https://github.com/Techboredom/Aether/releases/tag/v0.3.0
+[0.2.0]: https://github.com/Techboredom/Aether/releases/tag/v0.2.0
 [0.1.1]: https://github.com/Techboredom/Aether/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Techboredom/Aether/releases/tag/v0.1.0

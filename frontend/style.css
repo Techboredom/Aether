@@ -27,6 +27,15 @@
   --space-3: 12px;
   --space-4: 16px;
   --space-5: 24px;
+
+  /* Background treatment, shared with the marketing site so the two read as
+     one product. Tokens rather than literals so the light theme can
+     re-pitch it instead of inheriting a dimmed dark version. */
+  --grid-line: rgba(255, 255, 255, 0.03);
+  --grid-size: 48px;
+  --star: rgba(255, 255, 255, 0.7);
+  --glow-a: rgba(57, 135, 229, 0.28);
+  --glow-b: rgba(120, 90, 220, 0.20);
 }
 
 /* Validated light-mode steps from the design system's chart-chrome/ink
@@ -44,6 +53,13 @@
   --text-secondary: #52514e;
 
   --accent: #2a78d6;
+
+  /* No starfield on a light background — the dots read as dust or a dirty
+     screen rather than space. The grid carries the geometry instead. */
+  --grid-line: rgba(11, 11, 11, 0.045);
+  --star: transparent;
+  --glow-a: rgba(42, 120, 214, 0.13);
+  --glow-b: rgba(120, 90, 220, 0.09);
 }
 
 * {
@@ -57,6 +73,24 @@ body {
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
+}
+
+/* A fine graph-paper grid behind the whole app. Fixed, so content scrolls
+   across it rather than dragging it along, and faint enough to read as
+   texture in the gutters rather than as content — the tables and panels
+   above it keep their own opaque surfaces.
+   pointer-events:none is load-bearing: a full-viewport fixed layer would
+   otherwise intercept every click in the app. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+  background-size: var(--grid-size) var(--grid-size);
 }
 
 main {
@@ -113,12 +147,72 @@ header {
   font-size: 13px;
 }
 
+/* The login screen gets the full treatment — glows and a starfield on top of
+   the page-wide grid. It's the one view with no dense data to compete with,
+   so it can carry it; deliberately not applied behind the tabs, where a
+   starfield under a pod table would be noise sitting on top of the thing
+   someone is actually trying to read. */
 .login-screen {
   display: flex;
   align-items: center;
   justify-content: center;
   min-height: 100vh;
   padding: 16px;
+  position: relative;
+  /* Own stacking context, so the layers below sit above the page grid but
+     still behind the form. */
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.login-screen::before {
+  content: "";
+  position: absolute;
+  inset: -20%;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(46% 46% at 26% 22%, var(--glow-a), transparent 68%),
+    radial-gradient(42% 44% at 78% 16%, var(--glow-b), transparent 70%),
+    radial-gradient(60% 40% at 50% 4%, var(--glow-a), transparent 74%);
+  animation: aether-drift 38s ease-in-out infinite alternate;
+}
+
+/* Fixed positions rather than a repeating tile, so there's no visible seam.
+   Light mode sets --star: transparent, which removes this entirely. */
+.login-screen::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-repeat: no-repeat;
+  background-image:
+    radial-gradient(1.5px 1.5px at 9% 16%, var(--star), transparent 100%),
+    radial-gradient(1px 1px at 18% 58%, var(--star), transparent 100%),
+    radial-gradient(1.5px 1.5px at 24% 29%, var(--star), transparent 100%),
+    radial-gradient(1px 1px at 33% 78%, var(--star), transparent 100%),
+    radial-gradient(2px 2px at 39% 12%, var(--star), transparent 100%),
+    radial-gradient(1px 1px at 46% 41%, var(--star), transparent 100%),
+    radial-gradient(1.5px 1.5px at 55% 84%, var(--star), transparent 100%),
+    radial-gradient(1px 1px at 61% 22%, var(--star), transparent 100%),
+    radial-gradient(1.5px 1.5px at 68% 52%, var(--star), transparent 100%),
+    radial-gradient(1px 1px at 74% 9%, var(--star), transparent 100%),
+    radial-gradient(2px 2px at 81% 68%, var(--star), transparent 100%),
+    radial-gradient(1px 1px at 88% 34%, var(--star), transparent 100%),
+    radial-gradient(1.5px 1.5px at 93% 74%, var(--star), transparent 100%),
+    radial-gradient(1px 1px at 4% 62%, var(--star), transparent 100%);
+}
+
+@keyframes aether-drift {
+  from { transform: translate3d(-1.5%, -1%, 0) scale(1); }
+  to   { transform: translate3d(1.5%, 1.5%, 0) scale(1.05); }
+}
+
+/* Someone who has asked for less motion should not get a drifting
+   background behind a login form. */
+@media (prefers-reduced-motion: reduce) {
+  .login-screen::before { animation: none; }
 }
 
 .login-form {
@@ -181,6 +275,7 @@ h1 {
   margin: 0;
   letter-spacing: -0.01em;
 }
+
 
 .hidden {
   display: none;
