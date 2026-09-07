@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-07
+
+### Added
+
+- An **Access** column on the Pods tab — placed first, since opening a
+  running environment is the most common thing anyone does here and the
+  link previously sat at the far right, past the horizontal scroll.
+  "Open" now wears the accent colour rather than the same recessive
+  outline as every other control. The column shows where a running
+  deployment can actually be reached: proxy-enabled templates keep their
+  "Open" button (moved into this column); a `LoadBalancer` Service that has
+  been assigned an address also gets a "Direct" link; and every
+  deployment with a Service shows its in-cluster address
+  (`<svc>.<ns>.svc.cluster.local:<port>`) as selectable text. That last
+  one is the point for the internal templates — Ollama, vLLM and SGLang
+  are `ClusterIP` with no proxy, so previously the UI showed "—" and
+  there was no way to find their address without `kubectl`. The proxy
+  link can't substitute: it requires an Aether session, which a coding
+  tool calling an OpenAI-compatible API doesn't have.
+- Tables now show that they scroll horizontally: a permanently visible
+  scrollbar (macOS hides overlay scrollbars at rest, which was exactly
+  the wrong default for a table wider than its panel) plus a soft edge
+  shadow that appears only while there is more content past that edge,
+  and disappears at either end so it never misleads.
+- The chart's `Role` gains `list` on services, which the Access column needs.
+  **Existing installs must upgrade the chart, not just the image** — with
+  the old Role the lookup is denied and the column falls back to showing
+  no address (logged as a warning; nothing else breaks).
+
+### Fixed
+
+- **Proxied apps were broken on per-deployment origins.** Both proxied
+  templates hardcoded the URL prefix they're served under —
+  JupyterLab's `--ServerApp.base_url` and RStudio's `www-root-path`, both
+  `/proxy/{{name}}/` — which was correct only while a path under Aether's
+  own origin was the only way in. On a per-deployment origin the app sits
+  at the root, so RStudio redirected to `/proxy/<name>/auth-sign-in` and
+  then 404'd its own redirect ("The requested page was not found"), and
+  JupyterLab registered its routes under a prefix no request would ever
+  carry. A new always-substituted `{{proxy_root_path}}` placeholder
+  resolves to `/` when per-deployment origins are configured and
+  `/proxy/<name>/` when they aren't, so one template is correct under
+  both; migration `0020` rewrites the two seeded templates to use it,
+  leaving hand-edited ones alone.
+
+  Deployments launched before this keep the old prefix baked into their
+  args and must be relaunched.
+
+### Changed
+
+- The six model-serving fields (model, context length, quantization,
+  served model name, GPU memory utilization, dtype) are now shown in the
+  Launch and Templates forms only when the current `args` reference the
+  matching `{{placeholder}}`. Previously every template displayed all six,
+  so a JupyterLab or RStudio launch asked for a model it had no way to
+  use — and a value entered there was collected and then silently
+  discarded, since these fields only ever feed `args` substitution.
+  Keyed off the args rather than a hardcoded vLLM/SGLang image list, so a
+  new engine template needs no frontend change.
+
 ## [0.2.0] - 2026-09-04
 
 ### Added

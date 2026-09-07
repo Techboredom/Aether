@@ -100,6 +100,7 @@ pub fn pod_to_info(pod: &Pod) -> PodInfo {
         deployment_name,
         credential: None,
         proxy_path: None,
+        access: None,
     }
 }
 

@@ -85,6 +85,10 @@ pub fn PodsTab(is_admin: bool) -> impl IntoView {
                 <table>
                     <thead>
                         <tr>
+                            // First, not last: opening a running environment is
+                            // the most common thing anyone does on this tab, and
+                            // at the far right it sat past the horizontal scroll.
+                            <th>"Access"</th>
                             <th>"Name"</th>
                             <th class:hidden=!is_admin>"Owner"</th>
                             <th>"Status"</th>
@@ -130,9 +134,67 @@ fn PodRow(pod: PodInfo, selected_pod: RwSignal<Option<String>>, is_admin: bool) 
     let owner = pod.owner.clone().unwrap_or_else(|| "—".into());
     let credential = pod.credential.clone();
     let proxy_path = pod.proxy_path.clone();
+    // Split out up front so the view can use each independently without
+    // borrowing `pod.access` across the two closures below.
+    let external_url = pod.access.as_ref().and_then(|a| a.external_url.clone());
+    let internal_address = pod.access.as_ref().map(|a| a.internal.clone());
 
     view! {
         <tr class="clickable-row" on:click=move |_| selected_pod.set(Some(row_name.clone()))>
+            <td>
+                {if proxy_path.is_none() && internal_address.is_none() {
+                    view! { "—" }.into_any()
+                } else {
+                    view! {
+                        <div class="credential">
+                            {proxy_path.map(|path| {
+                                view! {
+                                    <a
+                                        class="icon-button primary-action"
+                                        href=path
+                                        target="_blank"
+                                        title="Open through Aether — already logged in, no token needed"
+                                        on:click=|ev: leptos::ev::MouseEvent| ev.stop_propagation()
+                                    >
+                                        "Open"
+                                    </a>
+                                }
+                            })}
+                            {external_url.map(|url| {
+                                let title = format!("Direct to this deployment's own address: {url}");
+                                view! {
+                                    <a
+                                        class="icon-button"
+                                        href=url
+                                        target="_blank"
+                                        title=title
+                                        on:click=|ev: leptos::ev::MouseEvent| ev.stop_propagation()
+                                    >
+                                        "Direct"
+                                    </a>
+                                }
+                            })}
+                            // Shown even when one of the links above exists: this is
+                            // the address another pod uses, which is what a coding
+                            // tool pointed at an OpenAI-compatible API needs. The
+                            // proxy link can't serve that purpose — it requires an
+                            // Aether session a program doesn't have.
+                            {internal_address.map(|addr| {
+                                view! {
+                                    <code
+                                        class="access-internal"
+                                        title="In-cluster address — reachable from other pods, not from a browser"
+                                        on:click=|ev: leptos::ev::MouseEvent| ev.stop_propagation()
+                                    >
+                                        {addr}
+                                    </code>
+                                }
+                            })}
+                        </div>
+                    }
+                        .into_any()
+                }}
+            </td>
             <td>{pod.name.clone()}</td>
             <td class:hidden=!is_admin>{owner}</td>
             <td>
@@ -150,35 +212,17 @@ fn PodRow(pod: PodInfo, selected_pod: RwSignal<Option<String>>, is_admin: bool) 
             <td>{format::bytes(pod.memory_limit_bytes)}</td>
             <td>{accelerators}</td>
             <td>
-                {if credential.is_none() && proxy_path.is_none() {
-                    view! { "—" }.into_any()
-                } else {
-                    view! {
+                {match credential {
+                    None => view! { "—" }.into_any(),
+                    Some(cred) => view! {
                         <div class="credential">
-                            {proxy_path.map(|path| {
-                                view! {
-                                    <a
-                                        class="icon-button"
-                                        href=path
-                                        target="_blank"
-                                        title="Open — already logged in, no token needed"
-                                        on:click=|ev: leptos::ev::MouseEvent| ev.stop_propagation()
-                                    >
-                                        "Open"
-                                    </a>
-                                }
-                            })}
-                            {credential.map(|cred| {
-                                view! {
-                                    <span class="credential-key">{cred.env_key}</span>
-                                    <code class="credential-value" title="Click to select, then copy">
-                                        {cred.value}
-                                    </code>
-                                }
-                            })}
+                            <span class="credential-key">{cred.env_key}</span>
+                            <code class="credential-value" title="Click to select, then copy">
+                                {cred.value}
+                            </code>
                         </div>
                     }
-                        .into_any()
+                        .into_any(),
                 }}
             </td>
         </tr>

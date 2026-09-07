@@ -32,10 +32,14 @@ rules:
   # depending on the template); `get` is also used by the reverse proxy
   # (backend/src/proxy.rs) to look up a proxy-enabled deployment's
   # ClusterIP to connect to; `delete` for the Pods tab's manage panel
-  # removing a deployment's Service too.
+  # removing a deployment's Service too. `list` backs the Pods tab's
+  # Access column (backend/src/visibility.rs), which reads each
+  # deployment's Service to show where it can actually be reached — one
+  # list for the namespace rather than a get per pod, which would be an
+  # N+1 against the apiserver on every pod-list request.
   - apiGroups: [""]
     resources: ["services"]
-    verbs: ["create", "get", "delete"]
+    verbs: ["create", "get", "list", "delete"]
   # Launch/Templates forms' storage-mount fields: `list` backs GET
   # /api/pvcs (any logged-in user, matches the Images catalog's visibility
   # level); `get` confirms a claim named in a launch request actually

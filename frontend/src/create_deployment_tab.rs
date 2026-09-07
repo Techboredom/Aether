@@ -67,6 +67,18 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
     // too (not just server-side) so the "Custom" option/free-text image
     // editing isn't hidden from the one role it was never meant to gate.
     let allow_custom = move || is_admin || my_quota.get().map(|q| q.allow_custom_images).unwrap_or(true);
+    // The model-serving fields below (model, context length, quantization,
+    // ...) exist only to be substituted into `args` — `{{model}}` and
+    // friends, see `substitute_placeholders` in backend/src/deployments.rs.
+    // A template whose args never mention a placeholder (JupyterLab,
+    // RStudio) would collect the value and then silently discard it, so
+    // don't ask for it at all.
+    //
+    // Keyed off the args themselves rather than a hardcoded vLLM/SGLang
+    // image list: a new engine template gets the right fields with no
+    // frontend change, and editing `args` to add a placeholder reveals its
+    // field immediately.
+    let uses = move |placeholder: &'static str| move || args_text.get().contains(placeholder);
 
     spawn_local(async move {
         if let Ok(quota) = api::get_json::<MyQuota>("/api/quota/me").await {
@@ -415,74 +427,86 @@ pub fn CreateDeploymentTab(is_admin: bool) -> impl IntoView {
                     <EnvVarsEditor vars=env_vars />
                 </fieldset>
 
-                <label>
-                    "Model (optional)"
-                    <input
-                        type="text"
-                        maxlength="500"
-                        placeholder="e.g. meta-llama/Llama-3-8B, or a local path under the mount below"
-                        prop:value=move || model.get()
-                        on:input=move |ev| model.set(event_target_value(&ev))
-                    />
-                </label>
+                <Show when=uses("{{model}}")>
+                    <label>
+                        "Model (optional)"
+                        <input
+                            type="text"
+                            maxlength="500"
+                            placeholder="e.g. meta-llama/Llama-3-8B, or a local path under the mount below"
+                            prop:value=move || model.get()
+                            on:input=move |ev| model.set(event_target_value(&ev))
+                        />
+                    </label>
+                </Show>
 
-                <label>
-                    "Context length (optional)"
-                    <input
-                        type="number"
-                        min="1"
-                        step="1"
-                        placeholder="e.g. 8192"
-                        prop:value=move || context_length.get()
-                        on:input=move |ev| context_length.set(event_target_value(&ev))
-                    />
-                </label>
+                <Show when=uses("{{context_length}}")>
+                    <label>
+                        "Context length (optional)"
+                        <input
+                            type="number"
+                            min="1"
+                            step="1"
+                            placeholder="e.g. 8192"
+                            prop:value=move || context_length.get()
+                            on:input=move |ev| context_length.set(event_target_value(&ev))
+                        />
+                    </label>
+                </Show>
 
-                <label>
-                    "Quantization (optional)"
-                    <input
-                        type="text"
-                        maxlength="100"
-                        placeholder="e.g. awq, gptq, fp8"
-                        prop:value=move || quantization.get()
-                        on:input=move |ev| quantization.set(event_target_value(&ev))
-                    />
-                </label>
+                <Show when=uses("{{quantization}}")>
+                    <label>
+                        "Quantization (optional)"
+                        <input
+                            type="text"
+                            maxlength="100"
+                            placeholder="e.g. awq, gptq, fp8"
+                            prop:value=move || quantization.get()
+                            on:input=move |ev| quantization.set(event_target_value(&ev))
+                        />
+                    </label>
+                </Show>
 
-                <label>
-                    "Served model name (optional)"
-                    <input
-                        type="text"
-                        maxlength="200"
-                        placeholder="a short name for the OpenAI-compatible API, if different from Model"
-                        prop:value=move || served_model_name.get()
-                        on:input=move |ev| served_model_name.set(event_target_value(&ev))
-                    />
-                </label>
+                <Show when=uses("{{served_model_name}}")>
+                    <label>
+                        "Served model name (optional)"
+                        <input
+                            type="text"
+                            maxlength="200"
+                            placeholder="a short name for the OpenAI-compatible API, if different from Model"
+                            prop:value=move || served_model_name.get()
+                            on:input=move |ev| served_model_name.set(event_target_value(&ev))
+                        />
+                    </label>
+                </Show>
 
-                <label>
-                    "GPU memory utilization (optional)"
-                    <input
-                        type="number"
-                        min="0.01"
-                        max="1"
-                        step="0.01"
-                        placeholder="e.g. 0.9 — fraction of GPU memory to reserve"
-                        prop:value=move || gpu_memory_utilization.get()
-                        on:input=move |ev| gpu_memory_utilization.set(event_target_value(&ev))
-                    />
-                </label>
+                <Show when=uses("{{gpu_memory_utilization}}")>
+                    <label>
+                        "GPU memory utilization (optional)"
+                        <input
+                            type="number"
+                            min="0.01"
+                            max="1"
+                            step="0.01"
+                            placeholder="e.g. 0.9 — fraction of GPU memory to reserve"
+                            prop:value=move || gpu_memory_utilization.get()
+                            on:input=move |ev| gpu_memory_utilization.set(event_target_value(&ev))
+                        />
+                    </label>
+                </Show>
 
-                <label>
-                    "Dtype (optional)"
-                    <input
-                        type="text"
-                        maxlength="50"
-                        placeholder="e.g. float16, bfloat16, auto"
-                        prop:value=move || dtype.get()
-                        on:input=move |ev| dtype.set(event_target_value(&ev))
-                    />
-                </label>
+                <Show when=uses("{{dtype}}")>
+                    <label>
+                        "Dtype (optional)"
+                        <input
+                            type="text"
+                            maxlength="50"
+                            placeholder="e.g. float16, bfloat16, auto"
+                            prop:value=move || dtype.get()
+                            on:input=move |ev| dtype.set(event_target_value(&ev))
+                        />
+                    </label>
+                </Show>
 
                 <fieldset>
                     <legend>"Storage mount (optional)"</legend>
